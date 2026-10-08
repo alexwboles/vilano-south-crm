@@ -16,7 +16,7 @@ import {
   allowEmail, createUser, setUserPassword, userCount,
   sampleLegislatorCount, loadSampleLegislators, purgeSampleLegislators,
 } from "./db.js";
-import { loadSampleContent, purgeSampleContent, sampleContentLoaded } from "./sample-content.js";
+import { loadSampleContent, purgeSampleContent, sampleContentLoaded, sampleContentComplete } from "./sample-content.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -111,6 +111,34 @@ function parseCookies(req) {
   return out;
 }
 
+// Picks the installer asset from a GitHub release's asset list.
+// Prefers the conventional VilanoCRM-Setup.exe name, but falls back to any
+// .exe so a differently-named upload (e.g. a browser-renamed copy like
+// "VilanoCRM-Setup.8.exe") doesn't silently break auto-update.
+export function pickUpdateAsset(assets) {
+  const list = Array.isArray(assets) ? assets : [];
+  return (
+    list.find((x) => x && /setup\.exe$/i.test(x.name || "")) ||
+    list.find((x) => x && /\.exe$/i.test(x.name || ""))
+  ) || null;
+}
+
+// Expected sample-legislator count, from the bundled dataset file.
+// Infinity fallback (file missing) means `full` can never be true, so the
+// Load button stays enabled and the click surfaces the missing-file error.
+const SAMPLE_LEG_EXPECTED = (() => {
+  try {
+    const rows = JSON.parse(fs.readFileSync(path.join(__dirname, "legislators.json"), "utf8"));
+    return Array.isArray(rows) ? rows.length : Number.POSITIVE_INFINITY;
+  } catch { return Number.POSITIVE_INFINITY; }
+})();
+
+// True only when the whole sample set is present. After a partial load this
+// is false, so the Load button stays enabled and a retry completes the rest.
+function sampleDatasetFull(db) {
+  return sampleLegislatorCount(db) >= SAMPLE_LEG_EXPECTED && sampleContentComplete(db);
+}
+
 export function createApp(db, { uploadsDir, port = null } = {}) {
   const app = express();
   app.disable("x-powered-by");
@@ -198,7 +226,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
         const tag = (rel.tag_name || "").replace(/^v/, "");
         updateState.latest = tag;
         if (tag && cmpVer(tag, APP_VERSION) > 0) {
-          const asset = (rel.assets || []).find((x) => /setup\.exe$/i.test(x.name));
+          const asset = pickUpdateAsset(rel.assets || []);
           if (asset) downloadUpdate(asset.browser_download_url, tag);
         }
       } catch (e) { updateState.error = "Could not read release info."; }
@@ -1150,7 +1178,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
   // ---- admin: sample dataset (real legislator roster + demo content) ----
   // Everything is flagged is_sample=1; the purge never touches real records.
   app.get("/api/admin/sample-legislators", (req, res) => {
-    res.json({ count: sampleLegislatorCount(db), content: sampleContentLoaded(db) });
+    res.json({ count: sampleLegislatorCount(db), content: sampleContentLoaded(db), full: sampleDatasetFull(db) });
   });
 
   // ---- admin: Cloudflare Tunnel (named tunnel token + hostname) ----

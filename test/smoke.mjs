@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { openDb, initSchema, bootstrapFreshDb } from "../db.js";
-import { createApp } from "../server.js";
+import { createApp, pickUpdateAsset } from "../server.js";
 
 const ADMIN_EMAIL = "admin@example.com";
 const ADMIN_PW = "s3cure-admin-pass";
@@ -722,6 +722,27 @@ console.log("sample dataset: full load / purge");
   ok("sample documents present", r.json?.length >= 3, `got ${r.json?.length}`);
   r = await req("GET", "/api/members");
   ok("member list includes samples", r.json?.length === beforeCount + fileLegs.length, `got ${r.json?.length}`);
+  r = await req("GET", "/api/admin/sample-legislators");
+  ok("sample set reports full after load", r.json?.full === true, `got ${JSON.stringify(r.json)}`);
+  // partial load: drop one section's samples -> set is not full, retry refills
+  // only the missing section without duplicating anything
+  db.prepare("DELETE FROM events WHERE is_sample = 1").run();
+  db.prepare("DELETE FROM documents WHERE is_sample = 1").run();
+  r = await req("GET", "/api/admin/sample-legislators");
+  ok("partial load reports full=false", r.json?.full === false, `got ${JSON.stringify(r.json)}`);
+  r = await req("POST", "/api/admin/sample-legislators");
+  ok("retry after partial load -> 200", r.status === 200, `got ${r.status}`);
+  ok("retry reports content loaded (not skipped)", r.json?.content?.loaded === true, `got ${JSON.stringify(r.json?.content)}`);
+  r = await req("GET", "/api/events");
+  ok("missing sample events refilled", r.json?.length >= 5, `got ${r.json?.length}`);
+  r = await req("GET", "/api/documents");
+  ok("missing sample documents refilled", r.json?.length >= 3, `got ${r.json?.length}`);
+  r = await req("GET", "/api/members");
+  ok("retry did not duplicate legislators", r.json?.length === beforeCount + fileLegs.length, `got ${r.json?.length}`);
+  r = await req("GET", "/api/interactions");
+  ok("retry did not duplicate interactions", r.json?.length >= 10 && r.json?.length <= 20, `got ${r.json?.length}`);
+  r = await req("GET", "/api/admin/sample-legislators");
+  ok("sample set full again after retry", r.json?.full === true, `got ${JSON.stringify(r.json)}`);
   // purge removes everything sample, files included
   r = await req("GET", "/api/documents");
   const sampleDoc = r.json?.find((d) => d.orig_name?.includes("SAMPLE") || d.orig_name?.includes("Sample"));
@@ -730,12 +751,27 @@ console.log("sample dataset: full load / purge");
   ok("purge deleted legislators", r.json?.legislators?.deleted === fileLegs.length, `got ${r.json?.legislators?.deleted}`);
   r = await req("GET", "/api/admin/sample-legislators");
   ok("sample count back to 0", r.json?.count === 0 && r.json?.content === false, `got ${JSON.stringify(r.json)}`);
+  ok("sample set not full after purge", r.json?.full === false, `got ${JSON.stringify(r.json)}`);
   r = await req("GET", "/api/interactions");
   ok("sample interactions purged", (r.json || []).length === 0, `got ${r.json?.length}`);
   r = await req("GET", "/api/events");
   ok("only real event remains", r.json?.length === 1 && r.json[0]?.description === "Real event", `got ${JSON.stringify(r.json)}`);
   r = await req("GET", "/api/members");
   ok("real member survives purge", r.json?.some((m) => m.last_name === "Person"), `got ${r.json?.length} members`);
+}
+
+console.log("update asset picker (auto-update)");
+{
+  const A = (name) => ({ name, browser_download_url: `https://x/${name}` });
+  ok("prefers conventional setup.exe name",
+    pickUpdateAsset([A("VilanoCRM-Setup.8.exe"), A("VilanoCRM-Setup.exe")])?.name === "VilanoCRM-Setup.exe");
+  ok("falls back to a renamed .exe upload",
+    pickUpdateAsset([A("VilanoCRM-Setup.8.exe")])?.name === "VilanoCRM-Setup.8.exe");
+  ok("renamed upload is found case-insensitively",
+    pickUpdateAsset([A("vilanocrm-setup-378.EXE")])?.name === "vilanocrm-setup-378.EXE");
+  ok("ignores non-exe assets", pickUpdateAsset([A("notes.txt"), A("checksums.sha256")]) === null);
+  ok("empty asset list -> null", pickUpdateAsset([]) === null);
+  ok("missing asset list -> null", pickUpdateAsset(undefined) === null);
 }
 
 console.log("seeded dev path (SEED=1): demo user + fictional data");

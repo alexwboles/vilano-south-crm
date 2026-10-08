@@ -17,8 +17,28 @@ export function sampleContentLoaded(db) {
   return t.some((tbl) => db.prepare(`SELECT COUNT(*) c FROM ${tbl} WHERE is_sample = 1`).get().c > 0);
 }
 
+// The sample set is "complete" when every section reached its expected size.
+// A partial load (e.g. interrupted request) is NOT complete, so a retry stays
+// allowed and fills only the missing sections instead of forcing delete+reload.
+export function sampleContentComplete(db) {
+  const need = { interactions: 10, events: 5, project_groups: 3, tasks: 7, staff: 4, documents: 3 };
+  return Object.entries(need).every(
+    ([tbl, n]) => db.prepare(`SELECT COUNT(*) c FROM ${tbl} WHERE is_sample = 1`).get().c >= n
+  );
+}
+
 export function loadSampleContent(db, uploadsDir) {
-  if (sampleContentLoaded(db)) return { loaded: false, skipped: true };
+  const have = (tbl) => db.prepare(`SELECT COUNT(*) c FROM ${tbl} WHERE is_sample = 1`).get().c > 0;
+  // Resumable: each section loads independently, so a retry after a partial
+  // load completes the missing sections instead of skipping everything.
+  const need = {
+    interactions: !have("interactions"),
+    events: !have("events"),
+    projects: !have("project_groups"), // tasks ride along with their groups
+    staff: !have("staff"),
+    documents: !have("documents"),
+  };
+  if (!Object.values(need).some(Boolean)) return { loaded: false, skipped: true };
 
   const addInteraction = db.prepare(
     "INSERT INTO interactions (member_id, date, summary, next_step, status, interaction_type, is_sample) VALUES (?,?,?,?,?,?,1)"
@@ -42,6 +62,7 @@ export function loadSampleContent(db, uploadsDir) {
 
   db.exec("BEGIN");
   try {
+    if (need.interactions) {
     // ---------- interactions (tied to real sample members) ----------
     const ix = [
       // last, state, date, summary, next_step, status, type
@@ -67,7 +88,9 @@ export function loadSampleContent(db, uploadsDir) {
       addInteraction.run(mid, date, summary, next, status, type);
       ixCount++;
     }
+    } // need.interactions
 
+    if (need.events) {
     // ---------- events ----------
     const ev = [
       ["2026-10-15", "Campus tour — House Education & Workforce majority staff", "Tyler"],
@@ -77,7 +100,9 @@ export function loadSampleContent(db, uploadsDir) {
       ["2026-09-30", "Veterans education listening session (completed)", "Tyler"],
     ];
     for (const [date, desc, lead] of ev) addEvent.run(date, desc, lead);
+    } // need.events
 
+    if (need.projects) {
     // ---------- projects + tasks ----------
     const g1 = addGroup.run("FY27 Appropriations Requests", 0).lastInsertRowid;
     addTask.run(g1, "Draft program request letters", "Jordan Ellis", "2026-10-18", "done", "Three program areas: simulation, veterans, STEM.", 0);
@@ -89,7 +114,9 @@ export function loadSampleContent(db, uploadsDir) {
     const g3 = addGroup.run("Veterans Education Initiative", 2).lastInsertRowid;
     addTask.run(g3, "Compile veteran graduate outcomes", "Jordan Ellis", "2026-11-10", "open", "", 0);
     addTask.run(g3, "Draft coalition support letter", "Tyler", "2026-11-20", "open", "", 1);
+    } // need.projects
 
+    if (need.staff) {
     // ---------- staff (fictional, per design guide) + assignments ----------
     const st = [
       ["Jordan", "Ellis", "Director of Government Relations", "jordan.ellis@example.com", "555-014-2201", "Lead on appropriations and member meetings."],
@@ -104,7 +131,9 @@ export function loadSampleContent(db, uploadsDir) {
       const mid = findMember(db, last, state);
       if (mid) addAssign.run(sid, mid, "2026-01-12");
     });
+    } // need.staff
 
+    if (need.documents) {
     // ---------- documents (generated text files) ----------
     const docs = [
       ["Campus Tour Agenda — Fall 2026.txt",
@@ -122,6 +151,7 @@ export function loadSampleContent(db, uploadsDir) {
       fs.writeFileSync(full, body);
       addDoc.run(stored, orig, Buffer.byteLength(body), "sample-data");
     }
+    } // need.documents
 
     db.exec("COMMIT");
   } catch (e) {

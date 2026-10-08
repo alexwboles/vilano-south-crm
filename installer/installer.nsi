@@ -1,10 +1,10 @@
-; Vilano South GR CRM — NSIS installer (3.7.9).
+; Vilano South GR CRM — NSIS installer (3.7.10).
 ; Built on Linux via installer/build.sh. Installs to %LOCALAPPDATA%\VilanoCRM
 ; (no UAC prompt). Upgrades in place: app files are overwritten, the data/
 ; folder is never touched by install or upgrade; uninstall asks before removing it.
 
 !define APP_NAME "Vilano CRM"
-!define APP_VERSION "3.7.9"
+!define APP_VERSION "3.7.10"
 !define PUBLISHER "Vilano South"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\VilanoCRM"
 
@@ -39,10 +39,8 @@ UninstallIcon "staging\public\favicon.ico"
 
 Section "Install" SecInstall
   ; Close any running copy first (updates install over the running app).
-  ; The tray owns the server child process, so killing the tray is enough;
-  ; the belt-and-braces node kill only targets our server.js instances.
   ExecWait 'taskkill /F /IM VilanoTray.exe' $0
-  ExecWait 'taskkill /F /FI "WINDOWTITLE eq Vilano*" /IM node.exe' $0
+  ExecWait 'taskkill /F /IM node.exe' $0
   SetOutPath "$INSTDIR"
   ; App files. data/ is intentionally NOT staged, so an existing database is
   ; never overwritten on install or upgrade.

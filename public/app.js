@@ -903,7 +903,7 @@ function openTaskModal(groupId, existing) {
 async function renderSettings() {
   const v = $("#view");
   v.innerHTML = `
-    <div class="view-head"><div><h2>Settings</h2><p class="hint">Access control for this workspace.</p></div></div>
+    <div class="view-head"><div><h2>Settings</h2><p class="hint">Access control for this workspace. <span id="app-version" class="muted"></span></p></div></div>
     <div class="settings-grid">
       <div class="card"><div class="pad">
         <h3>Approved emails</h3>
@@ -988,7 +988,9 @@ async function renderSettings() {
       $("#sample-status").textContent = s.count > 0
         ? `${s.count} sample legislators loaded.`
         : "No sample data loaded.";
-      $("#sample-load").disabled = s.count > 0;
+      // Only disable Load when the whole sample set is present; after a
+      // partial load the button stays enabled so a retry completes the rest.
+      $("#sample-load").disabled = s.full === true;
       $("#sample-purge").disabled = s.count === 0;
     } catch { $("#sample-status").textContent = "Could not check sample data status."; }
   }
@@ -1042,6 +1044,9 @@ async function renderSettings() {
     } catch (e) { fieldErr(e.message); }
   });
   refreshTunnelStatus();
+  api("/api/update-status").then(u => {
+    $("#app-version").textContent = `v${u.current}`;
+  }).catch(() => {});
 }
 
 async function loadSettings() {
