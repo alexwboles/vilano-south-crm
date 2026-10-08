@@ -693,6 +693,7 @@ console.log("sample dataset: full load / purge");
 {
   const fileLegs = JSON.parse(readFileSync(new URL("../legislators.json", import.meta.url), "utf8"));
   ok("legislators.json has 500+ rows", fileLegs.length > 500, `got ${fileLegs.length}`);
+  ok("legislators.json has committee data", fileLegs.some(m => (m.committees || []).length > 0), "no committees found");
   let r = await req("GET", "/api/admin/sample-legislators");
   ok("sample count starts at 0", r.json?.count === 0, `got ${JSON.stringify(r.json)}`);
   // real records must survive the purge

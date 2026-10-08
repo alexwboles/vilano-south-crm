@@ -335,6 +335,9 @@ export function loadSampleLegislators(db, legislators) {
   const add = db.prepare(
     "INSERT INTO members (chamber, first_name, last_name, party, state, district, is_sample) VALUES (?,?,?,?,?,?,1)"
   );
+  const addComm = db.prepare(
+    "INSERT INTO member_committees (member_id, name) VALUES (?,?)"
+  );
   let loaded = 0;
   db.exec("BEGIN");
   try {
@@ -342,7 +345,10 @@ export function loadSampleLegislators(db, legislators) {
       if (!m.first_name || !m.last_name) continue;
       if (m.chamber !== "house" && m.chamber !== "senate") continue;
       if (!["R", "D", "I"].includes(m.party)) continue;
-      add.run(m.chamber, m.first_name, m.last_name, m.party, m.state || "", m.district ?? null);
+      const r = add.run(m.chamber, m.first_name, m.last_name, m.party, m.state || "", m.district ?? null);
+      for (const c of m.committees || []) {
+        if (c) addComm.run(Number(r.lastInsertRowid), c);
+      }
       loaded++;
     }
     db.exec("COMMIT");
