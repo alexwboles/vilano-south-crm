@@ -1564,7 +1564,7 @@ $("#nav").addEventListener("click", (e) => {
   const b = e.target.closest("button[data-view]");
   if (!b) return;
   setNav(false);
-  if (b.dataset.view === "onepager") { window.open("/one-pager", "_blank"); return; }
+  if (b.dataset.view === "onepager") { location.href = "/one-pager"; return; }
   if (b.dataset.view === "phone") { location.href = "/phone"; return; }
   go(b.dataset.view);
 });

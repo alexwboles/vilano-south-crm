@@ -198,7 +198,7 @@ table.grid tbody tr.row:hover td { background: #f4f6fb; }
 .chamber {
   display: inline-block; vertical-align: 1px;
   font-size: 10.5px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase;
-  border-radius: 3px; padding: 2px 8px; margin-left: 8px; white-space: nowrap;
+  padding: 2px 8px; margin-left: 8px; white-space: nowrap;
 }
 .chamber.senate { background: var(--accent); color: #ffffff; }
 .chamber.house { background: #ffffff; color: var(--accent); border: 1px solid var(--accent-line); }
@@ -206,7 +206,7 @@ table.grid tbody tr.row:hover td { background: #f4f6fb; }
 .committee-chip {
   display: inline-block; font-size: 12px; font-weight: 500; color: #2c3e63;
   background: #f2f5fa; border: 1px solid var(--accent-line);
-  border-radius: 20px; padding: 3px 11px; margin: 1px 4px 1px 0; white-space: nowrap;
+  padding: 3px 11px; margin: 1px 4px 1px 0; white-space: nowrap;
 }
 button.committee-chip { cursor: pointer; font-family: var(--font); }
 button.committee-chip:hover { border-color: var(--accent); color: var(--accent-dark); background: var(--accent-soft); }
@@ -231,13 +231,15 @@ tr.detail td { background: #f5f7fc; }
 
 /* ---------- pills ---------- */
 .pill {
-  display: inline-block; font-size: 12px; font-weight: 700;
-  border-radius: 20px; padding: 4px 13px; white-space: nowrap;
-  border: 1px solid transparent; letter-spacing: 0.01em;
+  display: inline-block; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 3px 10px 3px 8px; white-space: nowrap;
+  border: 1px solid var(--line); border-left-width: 3px;
+  background: #fff; color: var(--ink);
 }
-.pill.open { background: var(--amber-bg); color: var(--amber-ink); border-color: var(--amber-line); }
-.pill.in_progress { background: var(--sky-bg); color: var(--sky-ink); border-color: var(--sky-line); }
-.pill.done { background: var(--green-bg); color: var(--green-ink); border-color: var(--green-line); }
+.pill.open { border-left-color: var(--amber-ink); }
+.pill.in_progress { border-left-color: var(--sky-ink); }
+.pill.done { border-left-color: var(--green-ink); }
 
 /* ---------- buttons & forms ---------- */
 .btn {
@@ -355,11 +357,14 @@ textarea { resize: vertical; min-height: 74px; line-height: 1.55; }
 .due { white-space: nowrap; }
 .due.overdue { color: var(--red-ink); font-weight: 600; }
 select.status-sel {
-  width: auto; padding: 6px 10px; font-size: 12.5px; font-weight: 700; border-radius: 20px; border: 1px solid transparent; cursor: pointer;
+  width: auto; padding: 6px 10px; font-size: 11px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: 0.06em;
+  border: 1px solid var(--line); border-left-width: 3px; cursor: pointer;
+  background: #fff; color: var(--ink);
 }
-select.status-sel.open { background: var(--amber-bg); color: var(--amber-ink); border-color: var(--amber-line); }
-select.status-sel.in_progress { background: var(--sky-bg); color: var(--sky-ink); border-color: var(--sky-line); }
-select.status-sel.done { background: var(--green-bg); color: var(--green-ink); border-color: var(--green-line); }
+select.status-sel.open { border-left-color: var(--amber-ink); }
+select.status-sel.in_progress { border-left-color: var(--sky-ink); }
+select.status-sel.done { border-left-color: var(--green-ink); }
 select.status-sel:focus { box-shadow: 0 0 0 3px rgba(201, 162, 39, 0.28); }
 
 /* ---------- settings ---------- */
