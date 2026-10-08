@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect your phone — GR CRM</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#16233f">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="mark">GR</div>
+      <h1>GR CRM</h1>
+      <p>Vilano South</p>
+    </div>
+    <nav class="nav">
+      <a href="/#interactions"><span class="dot"></span><span class="lbl">Interaction Log</span></a>
+      <a href="/#events"><span class="dot"></span><span class="lbl">Events</span></a>
+      <a href="/#projects"><span class="dot"></span><span class="lbl">Projects &amp; Tasks</span></a>
+      <a href="/#documents"><span class="dot"></span><span class="lbl">Documents</span></a>
+      <a href="/#staff"><span class="dot"></span><span class="lbl">Staff</span></a>
+      <a href="/one-pager"><span class="dot"></span><span class="lbl">One-Pager</span></a>
+      <a href="/#settings"><span class="dot"></span><span class="lbl">Settings</span></a>
+    </nav>
+  </aside>
+  <main class="main">
+    <div class="view-head">
+      <div>
+        <h2>Connect your phone</h2>
+        <p class="sub">Open the CRM on your phone — no typing needed. The public link is the easiest for your team.</p>
+      </div>
+    </div>
+    <div class="card phone-card">
+      <h3 class="phone-section-label">Public link — no app needed</h3>
+      <div id="public-block">
+        <img id="qr-public" alt="QR code for the CRM public link" width="220" height="220">
+        <div class="phone-url" id="phone-public-url">Loading…</div>
+        <p class="phone-hint">The simplest way for your team: scan with any phone, sign in with a CRM account —
+        no VPN app to install, works from anywhere. This link is free and has no user limit.
+        <strong>Note:</strong> the address changes when this computer restarts — always use the
+        current one shown here.</p>
+      </div>
+      <p class="phone-hint phone-muted" id="public-missing" hidden>Public link not ready yet — the tunnel starts automatically with the CRM. Wait a few seconds and reopen this page.</p>
+
+      <hr class="phone-divider">
+
+      <h3 class="phone-section-label">At home — same Wi-Fi</h3>
+      <img id="qr" src="/api/phone-qr.png" alt="QR code for the CRM address on your Wi-Fi" width="220" height="220">
+      <div class="phone-url" id="phone-url">Loading…</div>
+      <p class="phone-hint">On your phone's camera or browser, scan the code — or type the address above.
+      Your phone must be on the same Wi-Fi as this computer. You'll sign in with your CRM account.</p>
+
+      <hr class="phone-divider">
+
+      <h3 class="phone-section-label">Away from home — private network</h3>
+      <div id="remote-block">
+        <img id="qr-remote" alt="QR code for the CRM address over the private network" width="220" height="220">
+        <div class="phone-url" id="phone-remote-url">Loading…</div>
+        <p class="phone-hint">Works from anywhere — cellular, hotel Wi-Fi, wherever. A private-network app
+        (Tailscale or NetBird) must be running on this computer and on your phone, with your phone on the
+        same private network. You'll sign in with your CRM account.</p>
+      </div>
+      <p class="phone-hint phone-muted" id="remote-missing" hidden>No private-network connection detected. If Tailscale or NetBird is installed, make sure it's running and signed in, then reopen this page. (NetBird is included with the CRM installer.)</p>
+
+      <hr class="phone-divider">
+
+      <h3 class="phone-section-label">One-tap install — secure connection</h3>
+      <div id="secure-block">
+        <img id="qr-secure" alt="QR code for the CRM secure address (one-tap install)" width="220" height="220">
+        <div class="phone-url" id="phone-secure-url">Loading…</div>
+        <p class="phone-hint">Scan with your phone, sign in, and the CRM offers a one-tap <strong>Install</strong>
+        button — no browser menu needed. (iPhone: Share → Add to Home Screen.)</p>
+      </div>
+      <p class="phone-hint phone-muted" id="secure-missing" hidden>Secure address not available yet — make sure Tailscale is running and signed in on this computer, then reopen this page.</p>
+    </div>
+  </main>
+</div>
+<script>
+fetch("/api/phone-url", { credentials: "same-origin" })
+  .then(r => r.json())
+  .then(d => {
+    document.getElementById("phone-url").textContent = d.url;
+    if (d.publicUrl) {
+      document.getElementById("phone-public-url").textContent = d.publicUrl;
+      document.getElementById("qr-public").src = "/api/phone-qr-public.png";
+    } else {
+      document.getElementById("public-block").hidden = true;
+      document.getElementById("public-missing").hidden = false;
+    }
+    if (d.remoteUrl) {
+      document.getElementById("phone-remote-url").textContent = d.remoteUrl;
+      document.getElementById("qr-remote").src = "/api/phone-qr-remote.png";
+    } else {
+      document.getElementById("remote-block").hidden = true;
+      document.getElementById("remote-missing").hidden = false;
+    }
+    if (d.secureUrl) {
+      document.getElementById("phone-secure-url").textContent = d.secureUrl;
+      document.getElementById("qr-secure").src = "/api/phone-qr-secure.png";
+    } else {
+      document.getElementById("secure-block").hidden = true;
+      document.getElementById("secure-missing").hidden = false;
+    }
+  })
+  .catch(() => { document.getElementById("phone-url").textContent = "Could not determine the address."; });
+</script>
+</body>
+</html>

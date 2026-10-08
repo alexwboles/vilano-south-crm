@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GR CRM — Vilano South</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#16233f">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body class="has-drawer">
+<header class="topbar">
+  <button class="hamburger" id="nav-toggle" aria-label="Open navigation menu" aria-expanded="false" aria-controls="nav">
+    <span></span><span></span><span></span>
+  </button>
+  <div class="topbar-brand"><span class="mark">GR</span><span>GR CRM</span></div>
+</header>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="mark">GR</div>
+      <h1>GR CRM</h1>
+      <p>Vilano South</p>
+    </div>
+    <nav class="nav" id="nav">
+      <button data-view="interactions" class="active"><span class="dot"></span><span class="lbl">Interaction Log</span></button>
+      <button data-view="events"><span class="dot"></span><span class="lbl">Events</span></button>
+      <button data-view="projects"><span class="dot"></span><span class="lbl">Projects &amp; Tasks</span></button>
+      <button data-view="documents"><span class="dot"></span><span class="lbl">Documents</span></button>
+      <button data-view="staff"><span class="dot"></span><span class="lbl">Staff</span></button>
+      <button data-view="onepager"><span class="dot"></span><span class="lbl">One-Pager</span></button>
+      <button data-view="phone"><span class="dot"></span><span class="lbl">Connect Phone</span></button>
+      <button data-view="settings"><span class="dot"></span><span class="lbl">Settings</span></button>
+    </nav>
+    <div class="side-foot">
+      <div class="who" id="who"></div>
+      <button class="linklike" id="logout">Sign out</button>
+    </div>
+  </aside>
+  <main class="main" id="view"></main>
+</div>
+
+<div class="nav-scrim" id="nav-scrim"></div>
+<div class="scrim" id="scrim"></div>
+<aside class="panel" id="panel" aria-hidden="true">
+  <div class="panel-head"><h3 id="panel-title"></h3><button class="x-btn" id="panel-close">×</button></div>
+  <div class="panel-body" id="panel-body"></div>
+  <div class="panel-foot" id="panel-foot"></div>
+</aside>
+
+<div class="modal-wrap" id="modal-wrap">
+  <div class="scrim show" style="position:absolute" id="modal-scrim"></div>
+  <div class="modal">
+    <div class="panel-head"><h3 id="modal-title"></h3><button class="x-btn" id="modal-close">×</button></div>
+    <div class="panel-body" id="modal-body"></div>
+    <div class="panel-foot" id="modal-foot"></div>
+  </div>
+</div>
+
+<button class="fab" id="quick-log" title="Log interaction (L)" aria-label="Log interaction">+</button>
+<div class="install-banner" id="install-banner" hidden>
+  <div class="install-text"><strong>Install GR CRM on this phone</strong><span>One-tap access, just like a real app.</span></div>
+  <button class="btn small primary" id="install-btn">Install</button>
+  <button class="install-dismiss" id="install-dismiss" aria-label="Dismiss">×</button>
+</div>
+<div class="toast" id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>

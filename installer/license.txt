@@ -1,0 +1,15 @@
+Vilano South GR CRM — simple terms
+
+This software is provided for the private use of its licensed operators
+to track government-relations contacts, interactions, events, projects,
+and documents.
+
+- Your data lives on your own computer, in the app's data folder.
+  Nothing is sent anywhere unless you choose to share it.
+- Keep your sign-in private. Only email addresses you approve can sign in.
+- Uninstalling asks before touching your data; your records are kept
+  unless you explicitly choose to delete them.
+
+No warranty is provided. If something breaks, reinstalling the latest
+setup program over the existing install repairs the app without
+touching your data.

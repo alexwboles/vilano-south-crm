@@ -1,0 +1,5 @@
+node_modules/
+installer/staging/
+tray/VilanoTray.exe
+*.log
+.DS_Store

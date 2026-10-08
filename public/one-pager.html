@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Executive Summary — GR CRM</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="theme-color" content="#16233f">
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body class="pager-page">
+<div class="shell">
+  <aside class="sidebar no-print">
+    <div class="brand">
+      <div class="mark">GR</div>
+      <h1>GR CRM</h1>
+      <p>Vilano South</p>
+    </div>
+    <nav class="nav">
+      <a href="/#interactions"><span class="dot"></span><span class="lbl">Interaction Log</span></a>
+      <a href="/#events"><span class="dot"></span><span class="lbl">Events</span></a>
+      <a href="/#projects"><span class="dot"></span><span class="lbl">Projects &amp; Tasks</span></a>
+      <a href="/#documents"><span class="dot"></span><span class="lbl">Documents</span></a>
+      <a href="/#staff"><span class="dot"></span><span class="lbl">Staff</span></a>
+      <a href="/one-pager" class="active"><span class="dot"></span><span class="lbl">One-Pager</span></a>
+      <a href="/#settings"><span class="dot"></span><span class="lbl">Settings</span></a>
+    </nav>
+  </aside>
+  <div class="pager-main">
+<div class="pager">
+  <header class="pager-head">
+    <div class="pager-brand">
+      <div class="mark">GR</div>
+      <div>
+        <h1>Executive Summary</h1>
+        <p>GR CRM — Vilano South · <span id="gen-date"></span></p>
+      </div>
+    </div>
+    <button class="btn primary no-print" id="print-btn">Download / Print PDF</button>
+  </header>
+
+  <div class="quads">
+    <section class="quad">
+      <h2>Live Projects</h2>
+      <table class="grid compact">
+        <thead><tr><th>Main Project Description</th><th>Next Action</th><th>Status</th></tr></thead>
+        <tbody id="q-projects"></tbody>
+      </table>
+    </section>
+
+    <section class="quad">
+      <h2>Upcoming Events</h2>
+      <ul class="bullets" id="q-events"></ul>
+    </section>
+
+    <section class="quad">
+      <h2>Last Week's Interactions</h2>
+      <ul class="bullets" id="q-interactions"></ul>
+    </section>
+
+    <section class="quad">
+      <h2>Tasks To Do</h2>
+      <table class="grid compact">
+        <thead><tr><th>Task</th><th>Status</th><th>Owner</th></tr></thead>
+        <tbody id="q-tasks"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <footer class="pager-foot no-print">
+    <a href="/#interactions">← Back to GR CRM</a>
+    <span>Tip: in the print dialog choose “Save as PDF”, landscape orientation.</span>
+  </footer>
+</div>
+  </div>
+</div>
+<script src="/one-pager.js"></script>
+</body>
+</html>
