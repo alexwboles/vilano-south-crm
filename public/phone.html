@@ -8,6 +8,24 @@
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <meta name="theme-color" content="#16233f">
 <link rel="stylesheet" href="/styles.css">
+<style>
+.phone-connect { max-width: 560px; margin: 32px auto; text-align: center; }
+.phone-connect h2 { margin-bottom: 6px; }
+.phone-connect .sub { color: #5a6b7f; margin-bottom: 24px; }
+.qr-hero { background: #fff; border: 1px solid #e2e8f0; padding: 24px; margin-bottom: 24px; }
+.qr-hero img { display: block; margin: 0 auto 12px; }
+.qr-hero .phone-url { font-family: monospace; font-size: 13px; color: #334155; word-break: break-all; }
+.steps { text-align: left; background: #f8fafc; border: 1px solid #e2e8f0; padding: 20px 24px; margin-bottom: 16px; }
+.steps ol { margin: 0; padding-left: 20px; }
+.steps li { margin-bottom: 10px; line-height: 1.5; }
+.steps li:last-child { margin-bottom: 0; }
+.phone-alt { text-align: left; font-size: 13px; color: #5a6b7f; }
+.phone-alt summary { cursor: pointer; font-weight: 600; color: #334155; }
+.phone-alt .alt-row { margin: 8px 0; }
+.phone-alt code { font-size: 12px; word-break: break-all; }
+.back-link { display: inline-block; margin-bottom: 16px; color: #475569; text-decoration: none; font-size: 14px; }
+.back-link:hover { text-decoration: underline; }
+</style>
 </head>
 <body>
 <div class="shell">
@@ -28,85 +46,61 @@
     </nav>
   </aside>
   <main class="main">
-    <div class="view-head">
-      <div>
-        <h2>Connect your phone</h2>
-        <p class="sub">Open the CRM on your phone — no typing needed. The public link is the easiest for your team.</p>
+    <div class="phone-connect">
+      <a class="back-link" href="/#interactions">&larr; Back to CRM</a>
+      <h2>Connect your phone</h2>
+      <p class="sub" id="connect-sub">Scan the code with your phone's camera.</p>
+      <div class="qr-hero" id="qr-hero">
+        <img id="qr-main" alt="QR code to open the CRM on your phone" width="240" height="240">
+        <div class="phone-url" id="qr-url">Loading…</div>
       </div>
-    </div>
-    <div class="card phone-card">
-      <h3 class="phone-section-label">Public link — no app needed</h3>
-      <div id="public-block">
-        <img id="qr-public" alt="QR code for the CRM public link" width="220" height="220">
-        <div class="phone-url" id="phone-public-url">Loading…</div>
-        <p class="phone-hint">The simplest way for your team: scan with any phone, sign in with a CRM account —
-        no VPN app to install, works from anywhere. This link is free and has no user limit.
-        <strong>Note:</strong> the address changes when this computer restarts — always use the
-        current one shown here.</p>
+      <div class="steps">
+        <ol>
+          <li><strong>Scan</strong> the code above with your phone's camera.</li>
+          <li><strong>Sign in</strong> with your CRM account.</li>
+          <li><strong>Install the app:</strong> tap the <strong>Install</strong> banner at the top (iPhone: Share &rarr; Add to Home Screen).</li>
+        </ol>
       </div>
-      <p class="phone-hint phone-muted" id="public-missing" hidden>Public link not ready yet — the tunnel starts automatically with the CRM. Wait a few seconds and reopen this page.</p>
-
-      <hr class="phone-divider">
-
-      <h3 class="phone-section-label">At home — same Wi-Fi</h3>
-      <img id="qr" src="/api/phone-qr.png" alt="QR code for the CRM address on your Wi-Fi" width="220" height="220">
-      <div class="phone-url" id="phone-url">Loading…</div>
-      <p class="phone-hint">On your phone's camera or browser, scan the code — or type the address above.
-      Your phone must be on the same Wi-Fi as this computer. You'll sign in with your CRM account.</p>
-
-      <hr class="phone-divider">
-
-      <h3 class="phone-section-label">Away from home — private network</h3>
-      <div id="remote-block">
-        <img id="qr-remote" alt="QR code for the CRM address over the private network" width="220" height="220">
-        <div class="phone-url" id="phone-remote-url">Loading…</div>
-        <p class="phone-hint">Works from anywhere — cellular, hotel Wi-Fi, wherever. A private-network app
-        (Tailscale or NetBird) must be running on this computer and on your phone, with your phone on the
-        same private network. You'll sign in with your CRM account.</p>
-      </div>
-      <p class="phone-hint phone-muted" id="remote-missing" hidden>No private-network connection detected. If Tailscale or NetBird is installed, make sure it's running and signed in, then reopen this page. (NetBird is included with the CRM installer.)</p>
-
-      <hr class="phone-divider">
-
-      <h3 class="phone-section-label">One-tap install — secure connection</h3>
-      <div id="secure-block">
-        <img id="qr-secure" alt="QR code for the CRM secure address (one-tap install)" width="220" height="220">
-        <div class="phone-url" id="phone-secure-url">Loading…</div>
-        <p class="phone-hint">Scan with your phone, sign in, and the CRM offers a one-tap <strong>Install</strong>
-        button — no browser menu needed. (iPhone: Share → Add to Home Screen.)</p>
-      </div>
-      <p class="phone-hint phone-muted" id="secure-missing" hidden>Secure address not available yet — make sure Tailscale is running and signed in on this computer, then reopen this page.</p>
+      <details class="phone-alt">
+        <summary>Not working? Other ways to connect</summary>
+        <div id="alt-list" style="margin-top:10px"></div>
+      </details>
     </div>
   </main>
 </div>
 <script>
+// Pick the single best URL: public link first (works everywhere),
+// then secure/private, then same-Wi-Fi as a last resort.
 fetch("/api/phone-url", { credentials: "same-origin" })
   .then(r => r.json())
   .then(d => {
-    document.getElementById("phone-url").textContent = d.url;
-    if (d.publicUrl) {
-      document.getElementById("phone-public-url").textContent = d.publicUrl;
-      document.getElementById("qr-public").src = "/api/phone-qr-public.png";
-    } else {
-      document.getElementById("public-block").hidden = true;
-      document.getElementById("public-missing").hidden = false;
+    const candidates = [
+      { url: d.publicUrl, label: "Public link", qr: "/api/phone-qr-public.png", note: "Works from anywhere." },
+      { url: d.secureUrl, label: "Secure link", qr: "/api/phone-qr-secure.png", note: "Needs Tailscale on this PC." },
+      { url: d.remoteUrl, label: "Private network", qr: "/api/phone-qr-remote.png", note: "Needs Tailscale or NetBird on both." },
+      { url: d.url, label: "Same Wi-Fi", qr: "/api/phone-qr.png", note: "Phone must be on this Wi-Fi." },
+    ].filter(c => c.url);
+    if (!candidates.length) {
+      document.getElementById("qr-url").textContent = "No connection available — make sure the CRM is running.";
+      document.getElementById("qr-hero").querySelector("img").style.display = "none";
+      return;
     }
-    if (d.remoteUrl) {
-      document.getElementById("phone-remote-url").textContent = d.remoteUrl;
-      document.getElementById("qr-remote").src = "/api/phone-qr-remote.png";
-    } else {
-      document.getElementById("remote-block").hidden = true;
-      document.getElementById("remote-missing").hidden = false;
-    }
-    if (d.secureUrl) {
-      document.getElementById("phone-secure-url").textContent = d.secureUrl;
-      document.getElementById("qr-secure").src = "/api/phone-qr-secure.png";
-    } else {
-      document.getElementById("secure-block").hidden = true;
-      document.getElementById("secure-missing").hidden = false;
-    }
+    const best = candidates[0];
+    document.getElementById("qr-main").src = best.qr;
+    document.getElementById("qr-url").textContent = best.url;
+    document.getElementById("connect-sub").textContent =
+      `Scan the code with your phone's camera. (${best.label} — ${best.note})`;
+    const alt = document.getElementById("alt-list");
+    candidates.slice(1).forEach(c => {
+      const div = document.createElement("div");
+      div.className = "alt-row";
+      div.innerHTML = `<strong>${c.label}:</strong> <code></code><br><span>${c.note}</span>`;
+      div.querySelector("code").textContent = c.url;
+      alt.appendChild(div);
+    });
+    if (!candidates.slice(1).length) alt.innerHTML = "<p>No other connection methods available.</p>";
   })
-  .catch(() => { document.getElementById("phone-url").textContent = "Could not determine the address."; });
+  .catch(() => { document.getElementById("qr-url").textContent = "Could not determine the address."; });
 </script>
 </body>
 </html>

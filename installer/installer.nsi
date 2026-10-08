@@ -1,10 +1,10 @@
-; Vilano South GR CRM — NSIS installer (3.7.8).
+; Vilano South GR CRM — NSIS installer (3.7.9).
 ; Built on Linux via installer/build.sh. Installs to %LOCALAPPDATA%\VilanoCRM
 ; (no UAC prompt). Upgrades in place: app files are overwritten, the data/
 ; folder is never touched by install or upgrade; uninstall asks before removing it.
 
 !define APP_NAME "Vilano CRM"
-!define APP_VERSION "3.7.8"
+!define APP_VERSION "3.7.9"
 !define PUBLISHER "Vilano South"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\VilanoCRM"
 

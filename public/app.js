@@ -1560,7 +1560,7 @@ $("#nav").addEventListener("click", (e) => {
   if (!b) return;
   setNav(false);
   if (b.dataset.view === "onepager") { window.open("/one-pager", "_blank"); return; }
-  if (b.dataset.view === "phone") { window.open("/phone", "_blank"); return; }
+  if (b.dataset.view === "phone") { location.href = "/phone"; return; }
   go(b.dataset.view);
 });
 $("#logout").addEventListener("click", async () => {
