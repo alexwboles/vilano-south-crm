@@ -59,6 +59,57 @@ function isOverdue(iso) {
 }
 
 const STATUS_LABEL = { open: "Open", in_progress: "In progress", done: "Done" };
+// Searchable combobox: type to filter, click or Enter to pick.
+// Returns { get value(), setItems(items), set(id) }.
+function makeCombo(el, { items = [], selectedId = null, placeholder = "Type to search…", onChange = null } = {}) {
+  el.innerHTML = `<input type="text" placeholder="${esc(placeholder)}" autocomplete="off" aria-label="${esc(placeholder)}">
+    <div class="combo-list" role="listbox"></div>`;
+  const input = el.querySelector("input");
+  const list = el.querySelector(".combo-list");
+  let current = items;
+  let value = selectedId;
+  let hot = -1;
+
+  const labelOf = (id) => (current.find(x => String(x.id) === String(id)) || {}).label || "";
+  const render = (filter = "") => {
+    const q = filter.trim().toLowerCase();
+    const shown = q ? current.filter(x => x.label.toLowerCase().includes(q)) : current;
+    hot = -1;
+    list.innerHTML = shown.length
+      ? shown.map((x, i) => `<div class="combo-item" data-i="${i}" role="option">${esc(x.label)}</div>`).join("")
+      : `<div class="combo-empty">No matches.</div>`;
+    list.querySelectorAll(".combo-item").forEach(n => {
+      n.onclick = () => pick(shown[Number(n.dataset.i)]);
+    });
+    list._shown = shown;
+  };
+  const pick = (item) => {
+    if (!item) return;
+    value = item.id;
+    input.value = item.label;
+    el.classList.remove("open");
+    onChange && onChange(item.id);
+  };
+  input.addEventListener("focus", () => { render(input.value); el.classList.add("open"); });
+  input.addEventListener("input", () => { render(input.value); el.classList.add("open"); });
+  input.addEventListener("keydown", (e) => {
+    const shown = list._shown || [];
+    if (e.key === "Escape") { el.classList.remove("open"); }
+    else if (e.key === "ArrowDown" && shown.length) { e.preventDefault(); hot = (hot + 1) % shown.length; hl(); }
+    else if (e.key === "ArrowUp" && shown.length) { e.preventDefault(); hot = (hot - 1 + shown.length) % shown.length; hl(); }
+    else if (e.key === "Enter" && shown.length) { e.preventDefault(); pick(shown[hot >= 0 ? hot : 0]); }
+  });
+  const hl = () => list.querySelectorAll(".combo-item").forEach((n, i) => n.classList.toggle("hot", i === hot));
+  document.addEventListener("click", (e) => { if (!el.contains(e.target)) el.classList.remove("open"); });
+  if (value != null) input.value = labelOf(value);
+
+  return {
+    get value() { return value; },
+    setItems(next) { current = next; value = null; input.value = ""; render(""); },
+    set(id) { value = id; input.value = labelOf(id); },
+  };
+}
+
 function statusPill(s) {
   return `<span class="pill ${esc(s)}">${esc(STATUS_LABEL[s] || s)}</span>`;
 }
@@ -489,16 +540,16 @@ function openInteractionPanel(existing, prefill) {
       </div>
     </div>
     <div class="field">
-      <label>Member of Congress</label>
+      <label>Member</label>
       <div style="display:flex;gap:8px;align-items:center">
-        <select id="p-member" style="flex:1">${memberOpts}</select>
+        <div class="combo" id="p-member-combo" style="flex:1"></div>
         <span id="p-chamber"></span>
       </div>
       <div style="margin-top:6px"><button class="linklike" id="p-newm">+ New member</button></div>
     </div>
     <div class="field">
       <label>Staffer <span class="cap">— optional</span></label>
-      <select id="p-staffer"></select>
+      <div class="combo" id="p-staffer-combo"></div>
     </div>
     <div id="p-newm-form" style="display:none;border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:14px">
       <div class="form-row">
@@ -539,7 +590,7 @@ function openInteractionPanel(existing, prefill) {
     const show = f.style.display === "none";
     f.style.display = show ? "block" : "none";
     $("#p-newm").textContent = show ? "− Use existing member" : "+ New member";
-    $("#p-member").disabled = show;
+    $("#p-member-combo").querySelector("input").disabled = show;
   };
   $("#nm-chamber").onchange = (e) => {
     $("#nm-district-wrap").style.display = e.target.value === "house" ? "block" : "none";
@@ -586,14 +637,23 @@ function openInteractionPanel(existing, prefill) {
     };
   }
 
+  const memberCombo = makeCombo($("#p-member-combo"), {
+    items: ordered.map(m => ({ id: m.id, label: memberLabel(m) })),
+    selectedId: selMemberId,
+    placeholder: "Type a name to search…",
+    onChange: () => syncPanelChamber(),
+  });
+  const stafferCombo = makeCombo($("#p-staffer-combo"), {
+    items: [],
+    placeholder: "Type a name to search… (optional)",
+  });
   const syncPanelChamber = () => {
-    const m = state.members.find(x => x.id === Number($("#p-member").value));
+    const m = state.members.find(x => x.id === Number(memberCombo.value));
     $("#p-chamber").innerHTML = m ? chamberBadge(m.chamber) : "";
     // Staffer options: the member's current staff, plus "None".
     const staff = m?.current_staff || [];
     const selStaff = prefill?.staff_id || existing?.staff_id;
-    let opts = `<option value="">None</option>` + staff.map(s =>
-      `<option value="${s.id}" ${selStaff === s.id ? "selected" : ""}>${esc(staffWithTitle(s))}</option>`).join("");
+    let items = [{ id: "", label: "None" }].concat(staff.map(s => ({ id: s.id, label: staffWithTitle(s) })));
     // Keep a previously-attached staffer selectable even when they are no
     // longer on the member's current staff (edit flow, follow-up prefill,
     // "log another"). The staffer is never silently dropped.
@@ -608,18 +668,18 @@ function openInteractionPanel(existing, prefill) {
         if (found) nm = { first: found.first_name, last: found.last_name, title: found.title };
       }
       if (nm && nm.first) {
-        opts = `<option value="${selStaff}" selected>${esc(nm.first)} ${esc(nm.last)}${nm.title ? `, ${esc(nm.title)}` : ""} (former)</option>` + opts;
+        items.unshift({ id: selStaff, label: `${nm.first} ${nm.last}${nm.title ? `, ${nm.title}` : ""} (former)` });
       }
     }
-    $("#p-staffer").innerHTML = opts;
+    stafferCombo.setItems(items);
+    if (selStaff) stafferCombo.set(selStaff);
   };
-  $("#p-member").onchange = syncPanelChamber;
   syncPanelChamber();
 
   const doSave = async (keepOpen) => {
     fieldErr(null);
     try {
-      let memberId = $("#p-member").disabled ? null : Number($("#p-member").value);
+      let memberId = $("#p-member-combo").querySelector("input").disabled ? null : Number(memberCombo.value);
       if ($("#p-newm-form").style.display !== "none") {
         const committees = $("#nm-committees").value.split(",").map(s => s.trim()).filter(Boolean);
         const m = await api("/api/members", { method: "POST", body: JSON.stringify({
@@ -638,7 +698,7 @@ function openInteractionPanel(existing, prefill) {
         summary: $("#p-summary").value,
         next_step: $("#p-next").value,
         status: $("#p-status").value,
-        staff_id: $("#p-staffer").value ? Number($("#p-staffer").value) : null,
+        staff_id: stafferCombo.value ? Number(stafferCombo.value) : null,
         interaction_type: ixType || null,
         parent_id: prefill?.parent_id || existing?.parent_id || null,
       };
