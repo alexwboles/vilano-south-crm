@@ -8,6 +8,8 @@ import path from "node:path";
 import fs from "node:fs";
 import os from "node:os";
 import { execFileSync, spawn } from "node:child_process";
+import httpsMod from "node:https";
+import httpMod from "node:http";
 import { fileURLToPath } from "node:url";
 import {
   openDb, bootstrapFreshDb, findUserByEmail, verifyPassword, isAllowed,
@@ -167,7 +169,73 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     } catch {}
   });
 
-  // ---- Cloudflare Tunnel: free public https link (no monthly cost) ----
+  // ---- auto-update: check GitHub releases, download in background ----
+  // Polls the public releases API; when a newer version appears the installer
+  // is downloaded to the temp dir and the UI offers a one-click install.
+  // The installer closes the running app itself, so this never force-kills.
+  const APP_VERSION = (() => {
+    try {
+      return JSON.parse(fs.readFileSync(path.join(__dirname, "package.json"), "utf8")).version || "0.0.0";
+    } catch { return "0.0.0"; }
+  })();
+  const UPDATE_REPO = "alexwboles/vilano-south-crm";
+  const updateState = { current: APP_VERSION, latest: null, ready: false, file: null, checking: false, error: null };
+  const cmpVer = (a, b) => {
+    const pa = String(a).replace(/^v/, "").split(".").map(Number);
+    const pb = String(b).replace(/^v/, "").split(".").map(Number);
+    for (let i = 0; i < 3; i++) {
+      if ((pa[i] || 0) !== (pb[i] || 0)) return (pa[i] || 0) - (pb[i] || 0);
+    }
+    return 0;
+  };
+  const checkForUpdate = () => {
+    if (updateState.checking || updateState.ready) return;
+    updateState.checking = true;
+    const req = httpsGet(`https://api.github.com/repos/${UPDATE_REPO}/releases/latest`, { "User-Agent": "vilano-crm" }, (res, body) => {
+      updateState.checking = false;
+      try {
+        const rel = JSON.parse(body);
+        const tag = (rel.tag_name || "").replace(/^v/, "");
+        updateState.latest = tag;
+        if (tag && cmpVer(tag, APP_VERSION) > 0) {
+          const asset = (rel.assets || []).find((x) => /setup\.exe$/i.test(x.name));
+          if (asset) downloadUpdate(asset.browser_download_url, tag);
+        }
+      } catch (e) { updateState.error = "Could not read release info."; }
+    });
+    req.on("error", () => { updateState.checking = false; updateState.error = "Update check failed."; });
+  };
+  const downloadUpdate = (url, tag) => {
+    const dest = path.join(os.tmpdir(), `VilanoCRM-Setup-${tag}.exe`);
+    updateState.file = dest;
+    const file = fs.createWriteStream(dest);
+    httpsGet(url, { "User-Agent": "vilano-crm" }, (res, body) => {}, file)
+      .on("error", () => { updateState.error = "Download failed."; updateState.file = null; })
+      .on("close", () => {
+        try {
+          if (fs.statSync(dest).size > 10 * 1024 * 1024) {
+            updateState.ready = true;
+            console.log(`Update ${tag} downloaded — ready to install.`);
+          }
+        } catch {}
+      });
+  };
+  // Minimal https GET helper (follows one redirect, no deps).
+  function httpsGet(url, headers, onDone, pipeTo) {
+    const mod = url.startsWith("https:") ? httpsMod : httpMod;
+    const req = mod.get(url, { headers }, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return httpsGet(res.headers.location, headers, onDone, pipeTo);
+      }
+      if (pipeTo) { res.pipe(pipeTo); res.on("end", () => onDone(res)); return; }
+      let body = "";
+      res.on("data", (d) => (body += d));
+      res.on("end", () => onDone(res, body));
+    });
+    return req;
+  }
+  setImmediate(checkForUpdate);
+  setInterval(checkForUpdate, 6 * 60 * 60 * 1000);
   // Launches the bundled cloudflared on startup; captures the public URL from
   // its output for the Connect Phone page. No VPN app needed on phones, no
   // user limit. Best-effort: never throws, never blocks startup.
@@ -285,6 +353,25 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     }
     next();
   };
+
+  app.post("/api/update-install", requireAuth, (req, res) => {
+    if (!updateState.ready || !updateState.file || !fs.existsSync(updateState.file)) {
+      return res.status(400).json({ error: "No update downloaded yet." });
+    }
+    res.json({ ok: true });
+    // Launch the installer, then get out of its way. It closes the tray/server itself.
+    setTimeout(() => {
+      try {
+        spawn(`"${updateState.file}"`, [], { shell: true, detached: true, stdio: "ignore" }).unref();
+      } catch {}
+      setTimeout(() => process.exit(0), 1500);
+    }, 500);
+  });
+
+  app.get("/api/update-status", requireAuth, (req, res) => res.json({
+    current: updateState.current, latest: updateState.latest,
+    ready: updateState.ready, error: updateState.error,
+  }));
 
   // ---- public assets ----
   app.get("/health", (req, res) => res.json({ ok: true }));

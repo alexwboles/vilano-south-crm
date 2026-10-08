@@ -708,3 +708,14 @@ table.grid.compact td { padding: 8px 10px; }
   .quads { gap: 12px; }
   .pager-brand .mark { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
 }
+
+/* Update banner: appears under the topbar when a new version is downloaded */
+.update-banner {
+  display: flex; align-items: center; gap: 12px;
+  background: #0f2a44; color: #fff;
+  padding: 10px 16px; font-size: 14px;
+  position: sticky; top: 0; z-index: 60;
+}
+.update-banner[hidden] { display: none; }
+.update-banner .btn-sm { padding: 6px 12px; font-size: 13px; }
+#update-banner-text { flex: 1; }

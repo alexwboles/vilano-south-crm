@@ -662,6 +662,12 @@ console.log("bugfix regressions: member delete block, dates, cycles, assignment 
   r = await req("POST", "/api/admin/tunnel", { token: "", hostname: "" });
   r = await req("GET", "/api/admin/tunnel");
   ok("tunnel clear unlinks", r.json?.linked === false, `got ${r.json?.linked}`);
+  // auto-update status endpoint
+  r = await req("GET", "/api/update-status");
+  ok("update-status returns current version", typeof r.json?.current === "string" && r.json.current.length > 0, `got ${JSON.stringify(r.json)}`);
+  ok("update-status not ready initially", r.json?.ready === false, `got ${r.json?.ready}`);
+  r = await req("POST", "/api/update-install");
+  ok("update-install 400s with nothing downloaded", r.status === 400, `got ${r.status}`);
 }
 
 console.log("bugfix: self password change invalidates other sessions");

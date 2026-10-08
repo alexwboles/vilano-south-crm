@@ -1617,6 +1617,28 @@ window.addEventListener("appinstalled", () => setInstallVisible(false));
 // iOS never fires beforeinstallprompt — show the manual steps instead.
 if (isIos()) maybeShowInstall("manual");
 
+// ---------- auto-update ----------
+let updateDismissed = false;
+async function checkForUpdate() {
+  if (updateDismissed) return;
+  try {
+    const u = await api("/api/update-status");
+    if (u.ready && u.latest) {
+      $("#update-banner-text").textContent = `Version ${u.latest} is downloaded and ready to install.`;
+      $("#update-banner").hidden = false;
+    }
+  } catch {}
+}
+$("#update-dismiss-btn").onclick = () => { updateDismissed = true; $("#update-banner").hidden = true; };
+$("#update-install-btn").onclick = async () => {
+  if (!confirm("Install the update now? The CRM will close and reopen on the new version.")) return;
+  try {
+    await api("/api/update-install", { method: "POST" });
+    $("#update-banner-text").textContent = "Installing… the CRM will reopen shortly.";
+    $("#update-install-btn").disabled = true;
+  } catch (e) { toast("Could not start the update: " + e.message); }
+};
+
 // ---------- boot ----------
 (async () => {
   try {
@@ -1627,5 +1649,7 @@ if (isIos()) maybeShowInstall("manual");
     $("#who").textContent = me.email;
     const h = (location.hash || "").replace(/^#/, "");
     go(h || "interactions");
+    checkForUpdate();
+    setInterval(checkForUpdate, 30 * 60 * 1000);
   } catch { location.href = "/login.html"; }
 })();
