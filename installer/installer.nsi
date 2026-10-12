@@ -1,10 +1,10 @@
-; Vilano South GR CRM — NSIS installer (3.7.14).
+; Vilano South GR CRM — NSIS installer (3.7.19).
 ; Built on Linux via installer/build.sh. Installs to %LOCALAPPDATA%\VilanoCRM
 ; (no UAC prompt). Upgrades in place: app files are overwritten, the data/
 ; folder is never touched by install or upgrade; uninstall asks before removing it.
 
 !define APP_NAME "Vilano CRM"
-!define APP_VERSION "3.7.14"
+!define APP_VERSION "3.7.19"
 !define PUBLISHER "Vilano South"
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\VilanoCRM"
 
@@ -25,8 +25,6 @@ UninstallIcon "staging\public\favicon.ico"
 !define MUI_FINISHPAGE_RUN "$INSTDIR\VilanoTray.exe"
 !define MUI_FINISHPAGE_RUN_PARAMETERS "--firstrun"
 !define MUI_FINISHPAGE_RUN_TEXT "Launch ${APP_NAME}"
-!define MUI_FINISHPAGE_SHOWREADME ""
-!define MUI_FINISHPAGE_SHOWREADME_TEXT ""
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_LICENSE "license.txt"
@@ -49,10 +47,11 @@ Section "Install" SecInstall
   ; Start-at-logon (HKCU — no admin needed). The tray also self-heals this key.
   WriteRegStr HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "VilanoCRM" '"$INSTDIR\VilanoTray.exe"'
 
-  ; Shortcuts (tray exe + VS icon)
+  ; Shortcuts: the desktop shortcut opens the dashboard (--open); if the tray
+  ; is already running it just opens the browser, never a duplicate tray icon.
   CreateDirectory "$SMPROGRAMS\${APP_NAME}"
-  CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\VilanoTray.exe" "" "$INSTDIR\public\favicon.ico"
-  CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\VilanoTray.exe" "" "$INSTDIR\public\favicon.ico"
+  CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME}.lnk" "$INSTDIR\VilanoTray.exe" "--open" "$INSTDIR\public\favicon.ico"
+  CreateShortcut "$DESKTOP\${APP_NAME}.lnk" "$INSTDIR\VilanoTray.exe" "--open" "$INSTDIR\public\favicon.ico"
 
   ; Uninstaller + Add/Remove Programs entry
   WriteUninstaller "$INSTDIR\Uninstall.exe"
@@ -63,45 +62,6 @@ Section "Install" SecInstall
   WriteRegStr HKCU "${UNINST_KEY}" "UninstallString" "$INSTDIR\Uninstall.exe"
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINST_KEY}" "NoRepair" 1
-SectionEnd
-
-Section "NetBird — phone access away from home (recommended)" SecNetBird
-  ; Installs the NetBird client silently (/S) so phones can reach the CRM from
-  ; anywhere, not just home Wi-Fi. NetBird's own installer needs one Windows
-  ; admin approval (UAC prompt) because it installs a system service — that is
-  ; the only click. Afterwards: create one free NetBird account and sign in on
-  ; this PC and each phone (free tier covers commercial use: 5 users).
-  ; Skipped automatically when the NetBird installer wasn't staged at build
-  ; time, or when NetBird is already installed.
-  IfFileExists "$INSTDIR\netbird-installer.exe" +2 0
-    Goto netbird_done
-  IfFileExists "$PROGRAMFILES64\NetBird\netbird.exe" netbird_present 0
-  DetailPrint "Installing NetBird (one admin approval needed)..."
-  ExecWait '"$INSTDIR\netbird-installer.exe" /S' $0
-  IntCmp $0 0 netbird_done 0 0
-    MessageBox MB_OK|MB_ICONEXCLAMATION "NetBird did not finish installing (code $0).$\r$\nYou can install it later from netbird.io — phone access away from home needs it."
-    Goto netbird_done
-  netbird_present:
-    DetailPrint "NetBird already installed — skipping."
-  netbird_done:
-SectionEnd
-
-Section /o "Tailscale — alternative phone access (optional)" SecTailscale
-  ; Installs the Tailscale client silently (MSI /qn) as an alternative to
-  ; NetBird for away-from-home phone access. Opt-in: unchecked by default
-  ; because NetBird is the recommended default above. Skipped automatically
-  ; when the MSI wasn't staged at build time, or when Tailscale is present.
-  IfFileExists "$INSTDIR\tailscale-setup.msi" +2 0
-    Goto tailscale_done
-  IfFileExists "$PROGRAMFILES64\Tailscale\tailscale.exe" tailscale_present 0
-  DetailPrint "Installing Tailscale (silent)..."
-  ExecWait 'msiexec /i "$INSTDIR\tailscale-setup.msi" /qn /norestart' $0
-  IntCmp $0 0 tailscale_done 0 0
-    MessageBox MB_OK|MB_ICONEXCLAMATION "Tailscale did not finish installing (code $0).$\r$\nYou can install it later from tailscale.com/download — or use NetBird above."
-    Goto tailscale_done
-  tailscale_present:
-    DetailPrint "Tailscale already installed — skipping."
-  tailscale_done:
 SectionEnd
 
 Section "Cloudflare Tunnel — free public link for phones (recommended)" SecCloudflared
@@ -130,8 +90,6 @@ Section "Uninstall"
   ; Remove installed files (explicit list so data/ survives when kept).
   Delete "$INSTDIR\VilanoTray.exe"
   Delete "$INSTDIR\Uninstall.exe"
-  Delete "$INSTDIR\netbird-installer.exe"
-  Delete "$INSTDIR\tailscale-setup.msi"
   Delete "$INSTDIR\cloudflared.exe"
   Delete "$INSTDIR\server.js"
   Delete "$INSTDIR\db.js"

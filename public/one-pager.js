@@ -59,3 +59,11 @@ async function boot() {
 
 $("#print-btn").onclick = () => window.print();
 boot().catch(() => { document.body.innerHTML = "<p style='padding:40px'>Could not load the executive summary. Please sign in and try again.</p>"; });
+
+// Mobile nav drawer
+(function() {
+  var t = document.getElementById("nav-toggle"), s = document.getElementById("nav-scrim");
+  function setNav(o) { document.body.classList.toggle("nav-open", o); if (t) t.setAttribute("aria-expanded", String(o)); }
+  if (t) t.addEventListener("click", function() { setNav(!document.body.classList.contains("nav-open")); });
+  if (s) s.addEventListener("click", function() { setNav(false); });
+})();

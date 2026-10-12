@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/getlantern/systray"
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
 )
 
@@ -42,6 +43,7 @@ const (
 
 var (
 	firstrun   = flag.Bool("firstrun", false, "open the browser once the server is up")
+	openDash   = flag.Bool("open", false, "open the dashboard in the browser (exits if tray already running)")
 	exeDir     string
 	logPath    string
 	nodeBin    string
@@ -61,7 +63,30 @@ func logf(format string, args ...interface{}) {
 	}
 }
 
-// rotateLog rolls logs/server.log -> server.log.1 once it passes logMaxSize.
+// acquireSingleton returns true for the first tray instance, false if one is
+// already running (named Windows mutex). The second instance just opens the
+// dashboard instead of stacking another tray icon.
+func acquireSingleton() bool {
+	name, err := windows.UTF16PtrFromString("VilanoCRM-Tray-Singleton")
+	if err != nil {
+		return true
+	}
+	// CreateMutex returns the handle; if the mutex already existed, this is
+	// not the first instance.
+	h, err := windows.CreateMutex(nil, false, name)
+	if err != nil {
+		return false
+	}
+	// If GetLastError is ERROR_ALREADY_EXISTS, another instance holds it.
+	// (CreateMutex succeeds but signals existence via last-error.)
+	if errno, _ := windows.GetLastError().(windows.Errno); errno == windows.ERROR_ALREADY_EXISTS {
+		windows.CloseHandle(h)
+		return false
+	}
+	// Hold the handle for the process lifetime (don't close).
+	return true
+}
+
 func rotateLog() {
 	st, err := logFile.Stat()
 	if err != nil || st.Size() < logMaxSize {
@@ -261,7 +286,7 @@ func onReady() {
 	} else if waitHealthy(30 * time.Second) {
 		systray.SetIcon(iconRunning)
 		systray.SetTooltip(appName + " — running")
-		if *firstrun {
+		if *firstrun || *openDash {
 			openBrowser("http://127.0.0.1:" + serverPort + "/")
 		}
 	} else {
@@ -309,6 +334,15 @@ func onExit() {
 
 func main() {
 	flag.Parse()
+
+	// Singleton: only one tray instance. If another is already running,
+	// just open the dashboard in the browser and exit — never stack tray icons.
+	if !acquireSingleton() {
+		waitHealthy(10 * time.Second)
+		openBrowser("http://127.0.0.1:" + serverPort + "/")
+		return
+	}
+
 	exe, err := os.Executable()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "cannot locate executable:", err)

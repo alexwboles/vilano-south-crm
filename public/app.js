@@ -247,15 +247,20 @@ const state = { members: [], view: "interactions" };
 // =====================================================================
 // INTERACTION LOG
 // =====================================================================
-const ifilter = { q: "", chamber: "", status: "", from: "", to: "" };
+const ifilter = { q: "", chamber: "", status: "", from: "", to: "", type: "" };
+const INTERACTION_TYPES = ["Meeting", "Call", "Email", "Hallway touch"];
 
 async function renderInteractions() {
   const v = $("#view");
   v.innerHTML = `
     <div class="view-head">
       <div><h2>Interaction Log</h2><p class="hint">Every meeting and touch with members of Congress.</p></div>
-      <button class="btn primary" id="log-btn">Log interaction</button>
+      <div class="view-actions">
+        <button class="btn" id="export-csv-btn">Export CSV</button>
+        <button class="btn primary" id="log-btn">Log interaction</button>
+      </div>
     </div>
+    <div id="attention-strip"></div>
     <div class="filters">
       <div class="field grow"><label>Search</label><input type="text" id="f-q" placeholder="Member, summary, next step…" value="${esc(ifilter.q)}"></div>
       <div class="field"><label>Chamber</label><select id="f-chamber">
@@ -264,26 +269,59 @@ async function renderInteractions() {
       <div class="field"><label>Status</label><select id="f-status">
         <option value="">All</option>${Object.entries(STATUS_LABEL).map(([k, l]) =>
           `<option value="${k}" ${ifilter.status === k ? "selected" : ""}>${l}</option>`).join("")}</select></div>
+      <div class="field"><label>Type</label><select id="f-type">
+        <option value="">All</option>${INTERACTION_TYPES.map(t =>
+          `<option value="${t}" ${ifilter.type === t ? "selected" : ""}>${t}</option>`).join("")}</select></div>
       <div class="field"><label>From</label><input type="date" id="f-from" value="${esc(ifilter.from)}"></div>
       <div class="field"><label>To</label><input type="date" id="f-to" value="${esc(ifilter.to)}"></div>
       <div class="field"><label>&nbsp;</label><button class="btn" id="f-clear">Clear</button></div>
     </div>
     <p class="result-count" id="res-count"></p>
-    <div class="card"><div class="table-wrap"><table class="grid" id="ix-table">
-      <thead><tr><th>Date</th><th>Member</th><th>Committees</th><th>Summary</th><th>Next step</th><th>Status</th></tr></thead>
-      <tbody></tbody>
-    </table></div></div>`;
+    <div class="card ix-list"><div class="ix-head"><span>Interaction</span><span>Status</span></div><div id="ix-rows"></div></div>`;
   $("#log-btn").onclick = () => openInteractionPanel(null);
+  $("#export-csv-btn").onclick = () => {
+    const p = new URLSearchParams();
+    if (ifilter.q) p.set("q", ifilter.q);
+    if (ifilter.chamber) p.set("chamber", ifilter.chamber);
+    if (ifilter.status) p.set("status", ifilter.status);
+    if (ifilter.type) p.set("type", ifilter.type);
+    if (ifilter.from) p.set("from", ifilter.from);
+    if (ifilter.to) p.set("to", ifilter.to);
+    const qs = p.toString();
+    window.location.href = "/api/interactions.csv" + (qs ? "?" + qs : "");
+  };
+  renderAttentionStrip();
   const apply = () => {
     ifilter.q = $("#f-q").value; ifilter.chamber = $("#f-chamber").value;
-    ifilter.status = $("#f-status").value; ifilter.from = $("#f-from").value; ifilter.to = $("#f-to").value;
+    ifilter.status = $("#f-status").value; ifilter.type = $("#f-type").value;
+    ifilter.from = $("#f-from").value; ifilter.to = $("#f-to").value;
     loadInteractions();
   };
   ["f-q", "f-from", "f-to"].forEach(id => $("#" + id).addEventListener("input", apply));
-  ["f-chamber", "f-status"].forEach(id => $("#" + id).addEventListener("change", apply));
+  ["f-chamber", "f-status", "f-type"].forEach(id => $("#" + id).addEventListener("change", apply));
   $("#f-clear").onclick = () => { Object.keys(ifilter).forEach(k => ifilter[k] = ""); renderInteractions(); };
   state.members = await api("/api/members");
   await loadInteractions();
+}
+
+// Needs-attention strip: stale follow-ups, overdue tasks, upcoming events.
+async function renderAttentionStrip() {
+  const box = $("#attention-strip");
+  if (!box) return;
+  let data;
+  try { data = await api("/api/attention"); }
+  catch { return; }
+  const items = [];
+  (data.stale_interactions || []).forEach(r => items.push(
+    `<span class="att-tag stale">Stale</span> ${esc(r.member_label)} — next step "${esc(r.next_step)}" is ${esc(r.date)} and still ${esc(STATUS_LABEL[r.status] || r.status)}`));
+  (data.overdue_tasks || []).forEach(t => items.push(
+    `<span class="att-tag overdue">Overdue</span> Task "${esc(t.title)}" (${esc(t.group_name || "")}) was due ${esc(t.due_date)}`));
+  (data.upcoming_events || []).forEach(e => items.push(
+    `<span class="att-tag upcoming">Upcoming</span> ${esc(e.description)} — ${esc(e.date)} (${esc(e.lead_person || "")})`));
+  if (!items.length) return;
+  box.innerHTML = `<div class="card attention"><h3>Needs attention</h3><ul>${
+    items.slice(0, 12).map(i => `<li>${i}</li>`).join("")
+  }</ul></div>`;
 }
 
 async function loadInteractions() {
@@ -291,46 +329,56 @@ async function loadInteractions() {
   if (ifilter.q) p.set("q", ifilter.q);
   if (ifilter.chamber) p.set("chamber", ifilter.chamber);
   if (ifilter.status) p.set("status", ifilter.status);
+  if (ifilter.type) p.set("type", ifilter.type);
   if (ifilter.from) p.set("from", ifilter.from);
   if (ifilter.to) p.set("to", ifilter.to);
   const rows = await api("/api/interactions?" + p.toString());
   $("#res-count").textContent = `${rows.length} interaction${rows.length === 1 ? "" : "s"}`;
-  const tb = $("#ix-table tbody");
+  const wrap = $("#ix-rows");
   if (!rows.length) {
     const filtered = Object.values(ifilter).some(v => v);
-    tb.innerHTML = `<tr><td colspan="6">${filtered
+    wrap.innerHTML = filtered
       ? emptyState("No interactions match these filters.", "Try widening the search or clearing the filters.", "Clear filters", "clear")
-      : emptyState("No interactions logged yet.", "Record every meeting and touch with members of Congress.", "Log interaction", "log")}</td></tr>`;
-    wireEmptyCta(tb, "log", () => openInteractionPanel(null));
-    wireEmptyCta(tb, "clear", () => $("#f-clear").click());
+      : emptyState("No interactions logged yet.", "Record every meeting and touch with members of Congress.", "Log interaction", "log");
+    wireEmptyCta(wrap, "log", () => openInteractionPanel(null));
+    wireEmptyCta(wrap, "clear", () => $("#f-clear").click());
     return;
   }
-  tb.innerHTML = rows.map(r => `
-    <tr class="row" data-id="${r.id}">
-      <td style="white-space:nowrap">${esc(fmtDate(r.date))}${r.interaction_type ? `<div class="ix-type">${esc(r.interaction_type)}</div>` : ""}</td>
-      <td><span class="member-name">${esc(memberLabel(r))}</span>${chamberBadge(r.chamber)}${viaLine(r)}</td>
-      <td>${esc((r._committees || []).join(", "))}</td>
-      <td><span class="trunc">${esc(r.summary)}</span></td>
-      <td><span class="trunc">${esc(r.next_step || "—")}</span></td>
-      <td>${statusPill(r.status)}</td>
-    </tr>`).join("");
-  // attach committees (lookup) then wire expand
   const byMember = new Map(state.members.map(m => [m.id, m]));
-  $$("#ix-table tbody tr.row").forEach((tr, i) => {
-    const r = rows[i];
+  wrap.innerHTML = rows.map(r => {
     const m = byMember.get(r.member_id);
-    const cell = tr.children[2];
-    cell.innerHTML = m ? m.committees.map(committeeChip).join("") : "—";
-    tr.addEventListener("click", () => toggleInteractionDetail(tr, r, m));
+    const ch = r.chamber === "senate" ? "Senate" : "House";
+    const loc = r.chamber === "senate" ? (r.state || "") : (r.state && r.district ? `${r.state}-${r.district}` : (r.state || ""));
+    const comms = m ? m.committees.map(committeeChip).join("") : "";
+    return `
+    <div class="ix-row" data-id="${r.id}">
+      <div class="ix-r1">
+        <span class="ix-member">${esc(memberLabel(r))}<span class="ix-ch">${ch}${loc ? " · " + esc(loc) : ""}</span></span>
+        <span class="ix-date">${esc(fmtDate(r.date))}${r.interaction_type ? `<span class="ix-type">${esc(r.interaction_type)}</span>` : ""}</span>
+      </div>
+      <div class="ix-summary">${esc(r.summary)}</div>
+      <div class="ix-r3">
+        ${statusPill(r.status)}
+        ${r.next_step ? `<span class="ix-next">Next: ${esc(r.next_step)}</span>` : ""}
+        ${comms ? `<span class="ix-comms">${comms}</span>` : ""}
+        ${viaLine(r)}
+      </div>
+      <div class="ix-detail" style="display:none"></div>
+    </div>`;
+  }).join("");
+  // wire expand
+  $$("#ix-rows .ix-row").forEach((el, i) => {
+    el.addEventListener("click", (e) => {
+      if (e.target.closest("[data-committee]")) return; // committee chip handles itself
+      toggleInteractionDetail(el, rows[i], byMember.get(rows[i].member_id));
+    });
   });
 }
 
-function toggleInteractionDetail(tr, r, m) {
-  const next = tr.nextSibling;
-  if (next && next.classList && next.classList.contains("detail")) { next.remove(); return; }
-  const d = document.createElement("tr");
-  d.className = "detail";
-  d.innerHTML = `<td colspan="6"><div class="detail-box">
+function toggleInteractionDetail(el, r, m) {
+  const d = el.querySelector(".ix-detail");
+  if (d.style.display !== "none") { d.style.display = "none"; d.innerHTML = ""; return; }
+  d.innerHTML = `<div class="detail-box">
     <div class="full"><div class="lbl">Summary</div><div class="val">${esc(r.summary)}</div></div>
     <div><div class="lbl">Member</div><div class="val"><span class="member-name">${esc(memberLabel(r))}</span><br>
       ${chamberBadge(r.chamber)}</div></div>
@@ -360,8 +408,8 @@ function toggleInteractionDetail(tr, r, m) {
       <button class="btn small" data-act="edit">Edit</button>
       <button class="btn small danger" data-act="del">Delete</button>
     </div>
-  </div></td>`;
-  tr.after(d);
+  </div>`;
+  d.style.display = "block";
 
   // Follow-ups list (lazy).
   api("/api/interactions/" + r.id + "/followups").then(kids => {
@@ -407,7 +455,7 @@ function toggleInteractionDetail(tr, r, m) {
       await api(`/api/interactions/${r.id}/status`, { method: "POST", body: JSON.stringify({ status: v }) });
       r.status = v;
       e.target.className = "status-sel " + v;
-      tr.children[5].innerHTML = statusPill(v);
+      el.querySelector(".ix-r3 .pill").outerHTML = statusPill(v);
       d.querySelector("#ix-outcomes").style.display = v === "done" ? "" : "none";
       toast("Status updated.");
     } catch (err) { toast("Error: " + err.message); e.target.value = r.status; }

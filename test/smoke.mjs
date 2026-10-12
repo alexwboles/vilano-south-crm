@@ -820,6 +820,49 @@ console.log("bugfix: login timing oracle + rate limiting");
   ok("login rate limit trips -> 429", statuses[statuses.length - 1] === 429 && statuses.filter(s => s === 401).length >= 8, JSON.stringify(statuses));
 }
 
+console.log("type filter + CSV export + attention feed");
+{
+  const today = new Date();
+  const iso = (off) => { const d = new Date(today); d.setDate(d.getDate() + off); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+  let r = await req("POST", "/api/interactions", { member_id: memberId2, date: iso(-30), summary: "Stale probe meeting.", interaction_type: "Meeting", next_step: "Send the follow-up memo." });
+  const staleIx = r.json.id;
+  r = await req("POST", "/api/interactions", { member_id: memberId2, date: iso(-30), summary: 'Quoting, probe: says "hello", world.', interaction_type: "Call" });
+  const callIx = r.json.id;
+
+  // type filter
+  r = await req("GET", "/api/interactions?member_id=" + memberId2 + "&type=Meeting");
+  ok("type=Meeting filters to meetings", r.json.every(x => x.interaction_type === "Meeting") && r.json.some(x => x.id === staleIx), `got ${r.json.length}`);
+  r = await req("GET", "/api/interactions?member_id=" + memberId2 + "&type=Bogus");
+  ok("bogus type is ignored (no filter)", r.json.some(x => x.id === staleIx) && r.json.some(x => x.id === callIx));
+
+  // CSV export
+  r = await req("GET", "/api/interactions.csv?member_id=" + memberId2 + "&type=Call");
+  ok("CSV export -> 200 with header row", r.status === 200 && r.text.startsWith("date,member,chamber,party,state,district,type,status,summary,next_step"), `got ${r.status}`);
+  ok("CSV escapes commas and quotes", r.text.includes('"Quoting, probe: says ""hello"", world."'), r.text.slice(0, 200));
+  r = await req("GET", "/api/interactions.csv");
+  ok("CSV without filters includes all", r.status === 200 && r.text.includes("Stale probe meeting."));
+
+  // attention feed
+  r = await req("POST", "/api/projects/groups", { name: "Attention Test Group" });
+  const agid = r.json.id;
+  r = await req("POST", `/api/projects/groups/${agid}/tasks`, { title: "Overdue attention task", owner: "T. Boles", due_date: iso(-2) });
+  const atid = r.json.id;
+  r = await req("POST", "/api/events", { date: iso(5), description: "Attention test event", lead_person: "T. Boles" });
+  const aev = r.json.id;
+  r = await req("GET", "/api/attention");
+  ok("attention feed -> 200 with 3 lists", r.status === 200 && Array.isArray(r.json.stale_interactions) && Array.isArray(r.json.overdue_tasks) && Array.isArray(r.json.upcoming_events), `got ${r.status}`);
+  ok("stale interaction flagged", r.json.stale_interactions.some(x => x.id === staleIx && /Rep\. Multi Boss/.test(x.member_label || "")), JSON.stringify(r.json.stale_interactions));
+  ok("overdue task flagged", r.json.overdue_tasks.some(x => x.id === atid), JSON.stringify(r.json.overdue_tasks));
+  ok("upcoming event flagged", r.json.upcoming_events.some(x => x.id === aev), JSON.stringify(r.json.upcoming_events));
+
+  // cleanup
+  await req("DELETE", `/api/tasks/${atid}`);
+  await req("DELETE", `/api/projects/groups/${agid}`);
+  await req("DELETE", `/api/events/${aev}`);
+  await req("DELETE", `/api/interactions/${staleIx}`);
+  await req("DELETE", `/api/interactions/${callIx}`);
+}
+
 console.log("logout");
 {
   const r = await req("POST", "/api/logout");

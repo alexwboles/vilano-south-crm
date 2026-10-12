@@ -9,7 +9,13 @@
 <meta name="theme-color" content="#16233f">
 <link rel="stylesheet" href="/styles.css">
 </head>
-<body class="pager-page">
+<body class="pager-page has-drawer">
+<header class="topbar no-print">
+  <button class="hamburger" id="nav-toggle" aria-label="Open navigation menu" aria-expanded="false" aria-controls="nav">
+    <span></span><span></span><span></span>
+  </button>
+  <div class="topbar-brand"><span class="mark">GR</span><span>GR CRM</span></div>
+</header>
 <div class="shell">
   <aside class="sidebar no-print">
     <div class="brand">
@@ -28,6 +34,7 @@
       <a href="/#settings"><span class="dot"></span><span class="lbl">Settings</span></a>
     </nav>
   </aside>
+  <div class="nav-scrim no-print" id="nav-scrim"></div>
   <div class="pager-main">
 <div class="pager">
   <header class="pager-head">

@@ -751,7 +751,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
 
   // ---- interactions ----
   app.get("/api/interactions", (req, res) => {
-    const { q, chamber, status, member_id, from, to } = req.query;
+    const { q, chamber, status, member_id, from, to, type } = req.query;
     const conds = [], params = [];
     if (q) { conds.push("(i.summary LIKE ? ESCAPE '\\' OR i.next_step LIKE ? ESCAPE '\\' OR m.first_name LIKE ? ESCAPE '\\' OR m.last_name LIKE ? ESCAPE '\\')"); const like = `%${escapeLike(q)}%`; params.push(like, like, like, like); }
     if (CHAMBERS.includes(chamber)) { conds.push("m.chamber = ?"); params.push(chamber); }
@@ -759,6 +759,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     if (member_id) { conds.push("i.member_id = ?"); params.push(member_id); }
     if (validDate(from)) { conds.push("i.date >= ?"); params.push(from); }
     if (validDate(to)) { conds.push("i.date <= ?"); params.push(to); }
+    if (INTERACTION_TYPES.includes(type)) { conds.push("i.interaction_type = ?"); params.push(type); }
     const rows = db.prepare(`
       SELECT i.*, m.chamber, m.first_name, m.last_name, m.party, m.state, m.district,
              s.first_name AS staff_first_name, s.last_name AS staff_last_name, s.title AS staff_title,
@@ -779,6 +780,64 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
       }) : null,
     }));
     res.json(rows);
+  });
+
+  // CSV export of the interaction log — same filters as GET /api/interactions.
+  // Feeds the team's spreadsheets without copy-paste.
+  app.get("/api/interactions.csv", (req, res) => {
+    const { q, chamber, status, member_id, from, to, type } = req.query;
+    const conds = [], params = [];
+    if (q) { conds.push("(i.summary LIKE ? ESCAPE '\\' OR i.next_step LIKE ? ESCAPE '\\' OR m.first_name LIKE ? ESCAPE '\\' OR m.last_name LIKE ? ESCAPE '\\')"); const like = `%${escapeLike(q)}%`; params.push(like, like, like, like); }
+    if (CHAMBERS.includes(chamber)) { conds.push("m.chamber = ?"); params.push(chamber); }
+    if (STATUSES.includes(status)) { conds.push("i.status = ?"); params.push(status); }
+    if (member_id) { conds.push("i.member_id = ?"); params.push(member_id); }
+    if (validDate(from)) { conds.push("i.date >= ?"); params.push(from); }
+    if (validDate(to)) { conds.push("i.date <= ?"); params.push(to); }
+    if (INTERACTION_TYPES.includes(type)) { conds.push("i.interaction_type = ?"); params.push(type); }
+    const rows = db.prepare(`
+      SELECT i.date, i.interaction_type, i.status, i.summary, i.next_step,
+             m.chamber, m.first_name, m.last_name, m.party, m.state, m.district
+      FROM interactions i JOIN members m ON m.id = i.member_id
+      ${conds.length ? "WHERE " + conds.join(" AND ") : ""}
+      ORDER BY i.date DESC, i.id DESC
+    `).all(...params);
+    const cell = (v) => '"' + String(v ?? "").replace(/"/g, '""') + '"';
+    const lines = ["date,member,chamber,party,state,district,type,status,summary,next_step"];
+    for (const r of rows) {
+      lines.push([
+        r.date, `${r.first_name} ${r.last_name}`, r.chamber, r.party, r.state,
+        r.district ?? "", r.interaction_type ?? "", r.status, r.summary, r.next_step ?? "",
+      ].map(cell).join(","));
+    }
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="interactions.csv"');
+    res.send("\uFEFF" + lines.join("\r\n"));
+  });
+
+  // Needs-attention feed: stale open interactions with next steps, overdue
+  // tasks, and events in the next 14 days — one call for the dashboard strip.
+  app.get("/api/attention", (req, res) => {
+    const stale = db.prepare(`
+      SELECT i.id, i.date, i.summary, i.next_step, i.status,
+             m.chamber, m.first_name, m.last_name, m.party, m.state, m.district
+      FROM interactions i JOIN members m ON m.id = i.member_id
+      WHERE i.status IN ('open','in_progress')
+        AND i.next_step IS NOT NULL AND TRIM(i.next_step) <> ''
+        AND i.date < date('now', '-21 days')
+      ORDER BY i.date ASC LIMIT 25
+    `).all().map((r) => ({ ...r, member_label: memberFullLabel(r) }));
+    const overdue = db.prepare(`
+      SELECT t.id, t.title, t.owner, t.due_date, t.status, t.note, g.name AS group_name
+      FROM tasks t JOIN project_groups g ON g.id = t.group_id
+      WHERE t.status <> 'done' AND t.due_date IS NOT NULL AND t.due_date < date('now')
+      ORDER BY t.due_date ASC LIMIT 25
+    `).all();
+    const upcoming = db.prepare(`
+      SELECT id, date, description, lead_person FROM events
+      WHERE date >= date('now') AND date <= date('now', '+14 days')
+      ORDER BY date ASC LIMIT 25
+    `).all();
+    res.json({ stale_interactions: stale, overdue_tasks: overdue, upcoming_events: upcoming });
   });
 
   // Follow-ups of one interaction (children in the follow-up chain).
