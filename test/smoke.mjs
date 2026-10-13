@@ -901,6 +901,46 @@ console.log("member roster CSV + needing-contact + possible-duplicates");
   await req("DELETE", `/api/members/${fid}`);
 }
 
+console.log("redesign 2026-10-13: dashboard + members views");
+{
+  const { fileURLToPath } = await import("node:url");
+  const publicDir = fileURLToPath(new URL("../public/", import.meta.url));
+  const html = readFileSync(path.join(publicDir, "index.html"), "utf8");
+  const appjs = readFileSync(path.join(publicDir, "app.js"), "utf8");
+  const css = readFileSync(path.join(publicDir, "styles.css"), "utf8");
+
+  ok("nav has a Dashboard button", /data-view="dashboard"/.test(html), "missing data-view=dashboard");
+  ok("nav has a Members button", /data-view="members"/.test(html), "missing data-view=members");
+  ok("Dashboard is the first nav item", html.indexOf('data-view="dashboard"') < html.indexOf('data-view="interactions"'), "dashboard not first");
+  ok("app.js defines renderDashboard", /function renderDashboard\(\)/.test(appjs));
+  ok("app.js defines renderMembers", /function renderMembers\(\)/.test(appjs));
+  ok("app.js defines toggleMemberProfile", /function toggleMemberProfile\(/.test(appjs));
+  ok("app.js defines attentionGroups + attentionPanelHTML", /function attentionGroups\(\)/.test(appjs) && /function attentionPanelHTML\(/.test(appjs));
+  ok("dashboard boots by default", /go\(h \|\| "dashboard"\)/.test(appjs));
+  ok("member edit refreshes the members view", /state\.view === "members"\) loadMembers\(\)/.test(appjs));
+
+  // No rounded edges: every border-radius must be 0, var(--radius) with
+  // --radius: 0, or a true 50% circle.
+  const radiusVar = (css.match(/--radius:\s*([^;]+);/) || [])[1];
+  ok("--radius is 0", (radiusVar || "").trim() === "0", `got ${radiusVar}`);
+  const radii = [...css.matchAll(/border-radius:\s*([^;]+);/g)].map(m => m[1].trim());
+  const bad = radii.filter(v => !/^(0(\s+0){0,3}|50%|var\(--radius\))$/.test(v));
+  ok("styles.css has zero non-circle border-radius", bad.length === 0, `bad radii: ${bad.join(" | ").slice(0, 160)}`);
+
+  // Dashboard/member-directory feeds: shapes the new views consume.
+  let r = await req("GET", "/api/members/needing-contact");
+  ok("needing-contact -> 200 list", r.status === 200 && Array.isArray(r.json), `got ${r.status}`);
+  ok("needing-contact rows carry member_label + interaction_count",
+    r.json.every(m => typeof m.member_label === "string" && typeof m.interaction_count === "number"),
+    JSON.stringify(r.json.slice(0, 1)));
+  r = await req("GET", "/api/interactions?member_id=999999");
+  ok("member_id filter -> [] for unknown member", r.status === 200 && Array.isArray(r.json) && r.json.length === 0, `got ${r.status}`);
+  r = await req("GET", "/api/projects");
+  ok("projects -> 200 list (dashboard KPIs)", r.status === 200 && Array.isArray(r.json), `got ${r.status}`);
+  r = await req("GET", "/api/events");
+  ok("events -> 200 list (dashboard KPIs)", r.status === 200 && Array.isArray(r.json), `got ${r.status}`);
+}
+
 console.log("logout");
 {
   const r = await req("POST", "/api/logout");

@@ -304,30 +304,54 @@ async function renderInteractions() {
   await loadInteractions();
 }
 
-// Needs-attention strip: stale follow-ups, overdue tasks, upcoming events.
+// Needs-attention data, grouped for the briefing-panel treatment (dark navy
+// header, Quorum idiom). Shared by the interaction-log strip and the dashboard.
+async function attentionGroups() {
+  let data;
+  try { data = await api("/api/attention"); }
+  catch { return null; }
+  let quiet = [];
+  try { quiet = (await api("/api/members/needing-contact")) || []; } catch { /* strip still renders */ }
+  const groups = [];
+  const stale = data.stale_interactions || [];
+  if (stale.length) groups.push({
+    tag: "stale", label: "Stale follow-ups",
+    items: stale.map(r => `<span class="att-tag stale">Stale</span><span><span class="who">${esc(r.member_label)}</span> <span class="what">— next step "${esc(r.next_step)}" from ${esc(fmtDate(r.date))} is still ${esc(STATUS_LABEL[r.status] || r.status)}</span></span>`),
+  });
+  const overdue = data.overdue_tasks || [];
+  if (overdue.length) groups.push({
+    tag: "overdue", label: "Overdue tasks",
+    items: overdue.map(t => `<span class="att-tag overdue">Overdue</span><span><span class="who">"${esc(t.title)}"</span> <span class="what">${t.group_name ? `(${esc(t.group_name)}) ` : ""}was due ${esc(fmtDate(t.due_date))}</span></span>`),
+  });
+  const upcoming = data.upcoming_events || [];
+  if (upcoming.length) groups.push({
+    tag: "upcoming", label: "Coming up",
+    items: upcoming.map(e => `<span class="att-tag upcoming">Upcoming</span><span><span class="who">${esc(e.description)}</span> <span class="what">— ${esc(fmtDate(e.date))}${e.lead_person ? ` (${esc(e.lead_person)})` : ""}</span></span>`),
+  });
+  const qb = (quiet || []).slice(0, 8);
+  if (qb.length) groups.push({
+    tag: "touchbase", label: "Touch base",
+    items: qb.map(m => `<span class="att-tag touchbase">Touch base</span><span><span class="who">${esc(m.member_label)}</span> <span class="what">— ${m.last_contact ? `no logged contact since ${esc(fmtDate(m.last_contact))}` : "never contacted on record"}</span></span>`),
+  });
+  return groups;
+}
+
+function attentionPanelHTML(groups) {
+  const total = groups.reduce((n, g) => n + g.items.length, 0);
+  return `<div class="card"><div class="p-head"><h3>Needs attention</h3><span class="p-sub">${total} open item${total === 1 ? "" : "s"}</span></div>
+    <div class="attn-list">${groups.map(g => `
+      <div class="attn-group">${esc(g.label)}</div>
+      <ul>${g.items.map(i => `<li class="attn-item">${i}</li>`).join("")}</ul>`).join("")}
+    </div></div>`;
+}
+
+// Needs-attention strip on the interaction log (same data as the dashboard).
 async function renderAttentionStrip() {
   const box = $("#attention-strip");
   if (!box) return;
-  let data;
-  try { data = await api("/api/attention"); }
-  catch { return; }
-  const items = [];
-  (data.stale_interactions || []).forEach(r => items.push(
-    `<span class="att-tag stale">Stale</span> ${esc(r.member_label)} — next step "${esc(r.next_step)}" is ${esc(r.date)} and still ${esc(STATUS_LABEL[r.status] || r.status)}`));
-  (data.overdue_tasks || []).forEach(t => items.push(
-    `<span class="att-tag overdue">Overdue</span> Task "${esc(t.title)}" (${esc(t.group_name || "")}) was due ${esc(t.due_date)}`));
-  (data.upcoming_events || []).forEach(e => items.push(
-    `<span class="att-tag upcoming">Upcoming</span> ${esc(e.description)} — ${esc(e.date)} (${esc(e.lead_person || "")})`));
-  try {
-    const quiet = await api("/api/members/needing-contact");
-    (quiet || []).slice(0, 8).forEach(m => items.push(
-      `<span class="att-tag touchbase">Touch base</span> ${esc(m.member_label)} — ${
-        m.last_contact ? `no logged contact since ${esc(fmtDate(m.last_contact))}` : "never contacted on record"}`));
-  } catch { /* strip still renders without the member list */ }
-  if (!items.length) return;
-  box.innerHTML = `<div class="card attention"><h3>Needs attention</h3><ul>${
-    items.slice(0, 12).map(i => `<li>${i}</li>`).join("")
-  }</ul></div>`;
+  const groups = await attentionGroups();
+  if (!groups || !groups.length) return;
+  box.innerHTML = attentionPanelHTML(groups);
 }
 
 async function loadInteractions() {
@@ -353,14 +377,14 @@ async function loadInteractions() {
   const byMember = new Map(state.members.map(m => [m.id, m]));
   wrap.innerHTML = rows.map(r => {
     const m = byMember.get(r.member_id);
+    // Identity once: memberLabel already carries party/state/district.
     const ch = r.chamber === "senate" ? "Senate" : "House";
-    const loc = r.chamber === "senate" ? (r.state || "") : (r.state && r.district ? `${r.state}-${r.district}` : (r.state || ""));
     const comms = m ? m.committees.map(committeeChip).join("") : "";
     return `
     <div class="ix-row" data-id="${r.id}">
       <div class="ix-r1">
-        <span class="ix-member">${esc(memberLabel(r))}<span class="ix-ch">${ch}${loc ? " · " + esc(loc) : ""}</span></span>
-        <span class="ix-date">${esc(fmtDate(r.date))}${r.interaction_type ? `<span class="ix-type">${esc(r.interaction_type)}</span>` : ""}</span>
+        <span class="ix-member">${esc(memberLabel(r))}<span class="ix-ch">${ch}</span></span>
+        <span class="ix-date">${esc(fmtDate(r.date))}${r.interaction_type ? `<span class="ix-type-badge">${esc(r.interaction_type)}</span>` : ""}</span>
       </div>
       <div class="ix-summary">${esc(r.summary)}</div>
       <div class="ix-r3">
@@ -605,7 +629,7 @@ function openInteractionPanel(existing, prefill) {
       <label>Staffer <span class="cap">— optional</span></label>
       <div class="combo" id="p-staffer-combo"></div>
     </div>
-    <div id="p-newm-form" style="display:none;border:1px solid var(--line);border-radius:8px;padding:12px;margin-bottom:14px">
+    <div id="p-newm-form" style="display:none;border:1px solid var(--line);border-radius:0;padding:12px;margin-bottom:14px">
       <div class="form-row">
         <div class="field"><label>First name</label><input type="text" id="nm-first"></div>
         <div class="field"><label>Last name</label><input type="text" id="nm-last"></div>
@@ -1291,6 +1315,7 @@ function openMemberPanel(existing) {
       closePanel();
       toast(isEdit ? "Member updated." : "Member added.");
       if (state.view === "settings") loadSettings();
+      else if (state.view === "members") loadMembers();
     } catch (e) { fieldErr(e.message); }
   });
 }
@@ -1679,7 +1704,7 @@ if (navToggle && navScrim) {
 }
 
 // ---------- nav ----------
-const views = { interactions: renderInteractions, events: renderEvents, projects: renderProjects, documents: renderDocuments, staff: renderStaff, settings: renderSettings };
+const views = { dashboard: renderDashboard, interactions: renderInteractions, members: renderMembers, events: renderEvents, projects: renderProjects, documents: renderDocuments, staff: renderStaff, settings: renderSettings };
 
 // In-app fragment navigation: the one-pager links to /#events etc., and any
 // same-document hash change now switches views without a reload.
@@ -1794,8 +1819,343 @@ $("#update-install-btn").onclick = async () => {
     const me = await api("/api/me");
     $("#who").textContent = me.email;
     const h = (location.hash || "").replace(/^#/, "");
-    go(h || "interactions");
+    go(h || "dashboard");
     checkForUpdate();
     setInterval(checkForUpdate, 30 * 60 * 1000);
   } catch { location.href = "/login.html"; }
 })();
+
+// =====================================================================
+// DASHBOARD — command center (Quorum/FiscalNote/BGOV idiom). Read-only.
+// =====================================================================
+function isoDaysAgo(n) {
+  const t = new Date(); t.setDate(t.getDate() - n);
+  return t.toISOString().slice(0, 10);
+}
+
+// Jump to the interaction log filtered to one member (by last name).
+function filterLogToMember(lastName) {
+  ifilter.q = ""; ifilter.chamber = ""; ifilter.status = ""; ifilter.type = "";
+  ifilter.from = ""; ifilter.to = "";
+  go("interactions");
+  setTimeout(() => {
+    const q = $("#f-q");
+    if (q) { q.value = lastName || ""; q.dispatchEvent(new Event("input")); }
+  }, 200);
+}
+
+async function renderDashboard() {
+  const v = $("#view");
+  v.innerHTML = `
+    <div class="view-head">
+      <div><p class="eyebrow">Vilano South · Government Relations</p><h2>Dashboard</h2>
+      <p class="hint">Your briefing at a glance — activity, people, and what needs you.</p></div>
+    </div>
+    <div class="smart-search" id="ss">
+      <div class="ss-box">
+        <input type="text" id="ss-input" placeholder="Search members, summaries, staff…" aria-label="Search members and interactions" autocomplete="off">
+        <button class="btn primary" id="ss-go">Search</button>
+      </div>
+      <div class="ss-results" id="ss-results" role="listbox"></div>
+    </div>
+    <div class="kpi-grid" id="kpis"></div>
+    <div class="dash-grid">
+      <div>
+        <div class="card"><div class="p-head"><h3>Engagement activity</h3><span class="p-sub">interactions · last 12 months</span></div>
+          <div class="chart-wrap"><div class="chart-bars" id="chart"></div><div class="chart-axis" id="chart-axis"></div><div class="chart-foot" id="chart-foot"></div></div></div>
+        <div class="card" style="margin-top:20px"><div class="p-head"><h3>Recent interactions</h3><div class="p-actions"><button class="btn ghost" id="ri-all">View log</button></div></div>
+          <div id="ri-list"></div></div>
+      </div>
+      <div id="dash-attn"></div>
+    </div>`;
+  wireSmartSearch();
+  $("#ri-all").onclick = () => go("interactions");
+  try {
+    const [members, interactions, projects, events] = await Promise.all([
+      api("/api/members"), api("/api/interactions"),
+      api("/api/projects").catch(() => []), api("/api/events").catch(() => []),
+    ]);
+    state.members = members;
+    renderKpis(interactions, members, projects, events);
+    renderActivityChart(interactions);
+    renderRecentInteractions(interactions.slice(0, 6));
+    const groups = await attentionGroups();
+    const box = $("#dash-attn");
+    if (box) box.innerHTML = groups && groups.length ? attentionPanelHTML(groups)
+      : `<div class="card"><div class="p-head"><h3>Needs attention</h3></div><div class="empty-state"><div class="empty-title">All clear.</div><div class="empty-sub">No stale follow-ups, overdue tasks, or quiet relationships.</div></div></div>`;
+  } catch (e) { if (e.message !== "signed out") toast("Error: " + e.message); }
+}
+
+function renderKpis(interactions, members, projects, events) {
+  const box = $("#kpis"); if (!box) return;
+  const cutoff = isoDaysAgo(90);
+  const recent = interactions.filter(i => i.date >= cutoff);
+  const touched = new Set(recent.map(i => i.member_id)).size;
+  const everTouched = new Set(interactions.map(i => i.member_id)).size;
+  const openSteps = interactions.filter(i =>
+    (i.status === "open" || i.status === "in_progress") && (i.next_step || "").trim()).length;
+  const today = todayISO(), plus30 = isoDaysAgo(-30);
+  const upcoming = events.filter(e => e.date >= today && e.date <= plus30).length;
+  const overdueTasks = (projects || []).flatMap(g => g.tasks || [])
+    .filter(t => t.status !== "done" && t.due_date && isOverdue(t.due_date)).length;
+  const kpis = [
+    [recent.length, "Interactions · 90 days", `${touched} member${touched === 1 ? "" : "s"} engaged`],
+    [members.length, "Members tracked", `${everTouched} with logged contact`],
+    [openSteps, "Open next steps", overdueTasks ? `${overdueTasks} overdue task${overdueTasks === 1 ? "" : "s"}` : "nothing overdue"],
+    [upcoming, "Events · 30 days", upcoming ? "on the calendar" : "nothing scheduled"],
+  ];
+  box.innerHTML = kpis.map(([n, lbl, sub]) =>
+    `<div class="kpi"><div class="num">${n}</div><div class="lbl">${lbl}</div><div class="sub">${esc(sub)}</div></div>`).join("");
+}
+
+function renderActivityChart(interactions) {
+  const bars = $("#chart"), axis = $("#chart-axis"), foot = $("#chart-foot");
+  if (!bars) return;
+  const months = [];
+  const now = new Date();
+  for (let k = 11; k >= 0; k--) {
+    const d = new Date(now.getFullYear(), now.getMonth() - k, 1);
+    months.push({
+      key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
+      label: d.toLocaleDateString("en-US", { month: "short" }),
+    });
+  }
+  const counts = Object.fromEntries(months.map(m => [m.key, 0]));
+  for (const i of interactions) {
+    const k = (i.date || "").slice(0, 7);
+    if (k in counts) counts[k]++;
+  }
+  const max = Math.max(1, ...Object.values(counts));
+  const curKey = months[11].key;
+  bars.innerHTML = months.map(m => {
+    const c = counts[m.key];
+    const h = c ? Math.max(8, Math.round(c / max * 100)) : 2;
+    return `<div class="chart-bar${m.key === curKey ? " cur" : ""}" style="height:${h}%" title="${m.label}: ${c}"><span class="tip">${m.label} — ${c} interaction${c === 1 ? "" : "s"}</span></div>`;
+  }).join("");
+  axis.innerHTML = months.map((m, i) => `<span>${i % 2 === 0 ? m.label : ""}</span>`).join("");
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  foot.textContent = `${total} interaction${total === 1 ? "" : "s"} logged in the last 12 months.`;
+}
+
+function renderRecentInteractions(rows) {
+  const box = $("#ri-list"); if (!box) return;
+  if (!rows.length) {
+    box.innerHTML = `<div class="empty-state"><div class="empty-title">No interactions yet.</div><div class="empty-sub">Log the first meeting or touch to start the briefing.</div></div>`;
+    return;
+  }
+  const byMember = new Map(state.members.map(m => [m.id, m]));
+  box.innerHTML = rows.map(r => {
+    const m = byMember.get(r.member_id);
+    const sum = r.summary.length > 140 ? r.summary.slice(0, 140) + "…" : r.summary;
+    return `<div class="ri-row" data-ln="${esc(m ? m.last_name : r.last_name)}">
+      <div class="ri-top"><span class="ri-who">${esc(memberLabel(r))}</span><span class="ri-date">${esc(fmtDate(r.date))}</span></div>
+      <div class="ri-sum">${esc(sum)}</div>
+      <div class="ri-meta">${statusPill(r.status)}${r.interaction_type ? `<span class="ix-type-badge">${esc(r.interaction_type)}</span>` : ""}${r.next_step ? `<span class="ix-next">Next: ${esc(r.next_step)}</span>` : ""}</div>
+    </div>`;
+  }).join("");
+  box.querySelectorAll(".ri-row").forEach(el => el.onclick = () => filterLogToMember(el.dataset.ln));
+}
+
+// Smart search (BGOV idiom): one box across members + interactions.
+function wireSmartSearch() {
+  const wrap = $("#ss"), input = $("#ss-input"), res = $("#ss-results");
+  if (!wrap) return;
+  let t = null;
+  const close = () => wrap.classList.remove("open");
+  const submitSearch = () => {
+    const q = input.value.trim();
+    close(); input.value = "";
+    if (!q) return;
+    filterLogToMember("");
+    setTimeout(() => {
+      const f = $("#f-q");
+      if (f) { f.value = q; f.dispatchEvent(new Event("input")); }
+    }, 200);
+  };
+  const run = async () => {
+    const q = input.value.trim();
+    if (q.length < 2) { close(); return; }
+    const ql = q.toLowerCase();
+    if (!state.members.length) {
+      try { state.members = await api("/api/members"); } catch { return; }
+    }
+    const mems = state.members.filter(m =>
+      `${m.first_name} ${m.last_name}`.toLowerCase().includes(ql) ||
+      (m.committees || []).some(c => c.toLowerCase().includes(ql))).slice(0, 5);
+    let ixs = [];
+    try {
+      const rows = await api("/api/interactions?" + new URLSearchParams({ q }));
+      ixs = rows.slice(0, 5);
+    } catch { /* results still show members */ }
+    if (!mems.length && !ixs.length) {
+      res.innerHTML = `<div class="ss-empty">No members or interactions match "${esc(q)}".</div>`;
+    } else {
+      res.innerHTML =
+        (mems.length ? `<div class="ss-sec">Members</div>` + mems.map(m =>
+          `<div class="ss-item" role="option" data-mem="${m.id}"><span class="party-dot ${esc(m.party || "I")}">${esc((m.party || "I")[0])}</span><span class="member-name">${esc(m.first_name)} ${esc(m.last_name)}</span>${chamberBadge(m.chamber)}<span class="ss-meta">${esc(m.state)}${m.district ? `-${m.district}` : ""}</span></div>`).join("") : "") +
+        (ixs.length ? `<div class="ss-sec">Interactions</div>` + ixs.map(r =>
+          `<div class="ss-item" role="option" data-ixq="${esc(r.last_name)}"><span class="stat-mini">${esc(fmtDate(r.date))}</span><span class="trunc">${esc(r.summary)}</span><span class="ss-meta">${esc(memberLabel(r))}</span></div>`).join("") : "");
+    }
+    wrap.classList.add("open");
+    res.querySelectorAll("[data-mem]").forEach(el => el.onclick = () => { close(); openMemberFromSearch(Number(el.dataset.mem)); });
+    res.querySelectorAll("[data-ixq]").forEach(el => el.onclick = () => { close(); input.value = ""; filterLogToMember(el.dataset.ixq); });
+  };
+  input.addEventListener("input", () => { clearTimeout(t); t = setTimeout(run, 220); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") { close(); return; }
+    if (e.key === "Enter") { e.preventDefault(); submitSearch(); }
+  });
+  document.addEventListener("click", (e) => { if (!wrap.contains(e.target)) close(); });
+  $("#ss-go").onclick = submitSearch;
+}
+
+async function openMemberFromSearch(id) {
+  go("members");
+  setTimeout(() => {
+    const tr = document.querySelector(`#member-table tbody tr.row[data-id="${id}"]`);
+    if (tr) { tr.scrollIntoView({ block: "center" }); tr.click(); }
+  }, 350);
+}
+
+// =====================================================================
+// MEMBERS — legislator directory + profiles (BGOV directory idiom)
+// =====================================================================
+const mfilter = { q: "", chamber: "" };
+
+async function renderMembers() {
+  if (!state.members.length) state.members = await api("/api/members");
+  const v = $("#view");
+  v.innerHTML = `
+    <div class="view-head">
+      <div><p class="eyebrow">Directory</p><h2>Members of Congress</h2>
+      <p class="hint">Every tracked member — committees, staff, and last contact at a glance.</p></div>
+      <div class="view-actions"><button class="btn primary" id="mem-add">Add member</button></div>
+    </div>
+    <div class="filters">
+      <div class="field grow"><label>Search</label><input type="text" id="mf-q" placeholder="Name or committee…" value="${esc(mfilter.q)}"></div>
+      <div class="field"><label>Chamber</label><select id="mf-chamber">
+        <option value="">All</option><option value="house" ${mfilter.chamber === "house" ? "selected" : ""}>House</option>
+        <option value="senate" ${mfilter.chamber === "senate" ? "selected" : ""}>Senate</option></select></div>
+      <div class="field"><label>&nbsp;</label><button class="btn" id="mf-clear">Clear</button></div>
+    </div>
+    <p class="result-count" id="res-count"></p>
+    <div class="card"><div class="table-wrap"><table class="grid" id="member-table">
+      <thead><tr><th>Member</th><th>Chamber</th><th>Committees</th><th>Staff</th><th>Last contact</th></tr></thead>
+      <tbody id="mem-body"></tbody>
+    </table></div></div>`;
+  $("#mem-add").onclick = () => openMemberPanel(null);
+  const apply = () => { mfilter.q = $("#mf-q").value; mfilter.chamber = $("#mf-chamber").value; loadMembers(); };
+  $("#mf-q").addEventListener("input", apply);
+  $("#mf-chamber").addEventListener("change", apply);
+  $("#mf-clear").onclick = () => { mfilter.q = ""; mfilter.chamber = ""; renderMembers(); };
+  await loadMembers();
+}
+
+async function loadMembers() {
+  const tb = $("#mem-body");
+  if (!tb) return;
+  const [rows, quiet] = await Promise.all([
+    api("/api/interactions").catch(() => []),
+    api("/api/members/needing-contact").catch(() => []),
+  ]);
+  const lastBy = new Map(), countBy = new Map();
+  for (const r of rows) {
+    if (!lastBy.has(r.member_id) || r.date > lastBy.get(r.member_id)) lastBy.set(r.member_id, r.date);
+    countBy.set(r.member_id, (countBy.get(r.member_id) || 0) + 1);
+  }
+  const quietIds = new Set((quiet || []).map(m => m.id));
+  const q = mfilter.q.trim().toLowerCase();
+  const list = state.members.filter(m => {
+    if (mfilter.chamber && m.chamber !== mfilter.chamber) return false;
+    if (q && !`${m.first_name} ${m.last_name}`.toLowerCase().includes(q) &&
+      !(m.committees || []).some(c => c.toLowerCase().includes(q))) return false;
+    return true;
+  });
+  $("#res-count").textContent = `${list.length} member${list.length === 1 ? "" : "s"}`;
+  if (!list.length) {
+    const filtered = mfilter.q || mfilter.chamber;
+    tb.innerHTML = `<tr><td colspan="5">${filtered
+      ? emptyState("No members match these filters.", "Try widening the search.", "Clear filters", "clear")
+      : emptyState("No members tracked yet.", "Add members of Congress to build the directory.", "Add member", "add")}</td></tr>`;
+    wireEmptyCta(tb, "add", () => openMemberPanel(null));
+    wireEmptyCta(tb, "clear", () => $("#mf-clear").click());
+    return;
+  }
+  tb.innerHTML = list.map(m => {
+    const staffN = (m.current_staff || []).length;
+    const last = lastBy.get(m.id);
+    const geo = m.chamber === "house" ? `${esc(m.state)}-${esc(String(m.district ?? ""))}` : esc(m.state);
+    return `<tr class="row" data-id="${m.id}">
+      <td><div class="mem-id"><span class="party-dot ${esc(m.party || "I")}">${esc((m.party || "I")[0])}</span>
+        <span><span class="member-name">${esc(m.first_name)} ${esc(m.last_name)}</span><br><span class="geo">${geo}</span></span></div></td>
+      <td>${chamberBadge(m.chamber)}</td>
+      <td>${m.committees.length
+        ? `<span class="stat-mini">${m.committees.length} <span class="cap">— ${esc(m.committees.slice(0, 2).join(", "))}${m.committees.length > 2 ? "…" : ""}</span></span>`
+        : '<span style="color:var(--ink-faint)">—</span>'}</td>
+      <td><span class="stat-mini">${staffN}</span></td>
+      <td>${last
+        ? `<span class="stat-mini">${esc(fmtDate(last))}</span>${quietIds.has(m.id) ? ' <span class="last-quiet">· quiet</span>' : ""}`
+        : '<span class="last-quiet">Never</span>'}</td>
+    </tr>`;
+  }).join("");
+  const byId = new Map(list.map(m => [m.id, m]));
+  tb.querySelectorAll("tr.row").forEach(tr => tr.addEventListener("click", () =>
+    toggleMemberProfile(tr, byId.get(Number(tr.dataset.id)), {
+      last: lastBy.get(Number(tr.dataset.id)),
+      count: countBy.get(Number(tr.dataset.id)) || 0,
+    })));
+}
+
+// Legislator profile: tabbed record view (BGOV idiom) — overview, staff, history.
+async function toggleMemberProfile(tr, m, stats) {
+  const next = tr.nextSibling;
+  if (next && next.classList && next.classList.contains("detail")) { next.remove(); return; }
+  const el = document.createElement("tr");
+  el.className = "detail";
+  const geo = m.chamber === "house" ? `${esc(m.state)}-${esc(String(m.district ?? ""))}` : esc(m.state);
+  el.innerHTML = `<td colspan="5" class="mem-profile">
+    <div class="mem-tabs" role="tablist">
+      <button class="on" data-tab="ov">Overview</button>
+      <button data-tab="staff">Staff (${(m.current_staff || []).length})</button>
+      <button data-tab="hist">History (${stats.count})</button>
+    </div>
+    <div class="mem-pane on" data-pane="ov"><div class="detail-box">
+      <div><div class="lbl">Member</div><div class="val"><span class="member-name">${esc(m.first_name)} ${esc(m.last_name)}</span><br>${chamberBadge(m.chamber)} <span class="geo">${geo}</span></div></div>
+      <div><div class="lbl">Engagement</div><div class="val">${stats.count} logged interaction${stats.count === 1 ? "" : "s"}${stats.last ? `<br>Last contact ${esc(fmtDate(stats.last))}` : "<br>Never contacted on record"}</div></div>
+      <div class="full"><div class="lbl">Committees</div><div class="val">${m.committees.length ? m.committees.map(committeeChip).join("") : "—"}</div></div>
+    </div></div>
+    <div class="mem-pane" data-pane="staff"><div class="val">${memberStaffHTML(m)}</div></div>
+    <div class="mem-pane" data-pane="hist"><div class="val" id="mem-hist"><span style="color:var(--ink-faint)">Loading…</span></div></div>
+    <div class="detail-actions" style="padding:0 18px 16px">
+      <button class="btn small primary" data-act="log">Log interaction</button>
+      <button class="btn small" data-act="edit">Edit member</button>
+      <button class="btn small" data-act="ix">View in log</button>
+    </div>
+  </td>`;
+  tr.after(el);
+  el.querySelectorAll(".mem-tabs button").forEach(b => b.onclick = (e) => {
+    e.stopPropagation();
+    el.querySelectorAll(".mem-tabs button").forEach(x => x.classList.toggle("on", x === b));
+    el.querySelectorAll(".mem-pane").forEach(p => p.classList.toggle("on", p.dataset.pane === b.dataset.tab));
+  });
+  try {
+    const h = await api("/api/interactions?" + new URLSearchParams({ member_id: String(m.id) }));
+    const box = el.querySelector("#mem-hist");
+    if (box && box.isConnected) {
+      box.innerHTML = h.length
+        ? `<div class="table-wrap"><table class="grid compact"><tbody>` +
+          h.slice(0, 12).map(r => `<tr><td style="white-space:nowrap">${esc(fmtDate(r.date))}</td>
+            <td>${r.interaction_type ? `<span class="ix-type-badge">${esc(r.interaction_type)}</span>` : "—"}</td>
+            <td><span class="trunc">${esc(r.summary)}</span></td><td>${statusPill(r.status)}</td></tr>`).join("") +
+          `</tbody></table></div>` +
+          (h.length > 12 ? `<div style="margin-top:8px;font-size:12.5px;color:var(--ink-faint)">+ ${h.length - 12} more in the log.</div>` : "")
+        : '<span style="color:var(--ink-faint)">No interactions with this member yet.</span>';
+    }
+  } catch {
+    const box = el.querySelector("#mem-hist");
+    if (box && box.isConnected) box.innerHTML = '<span style="color:var(--ink-faint)">Could not load history.</span>';
+  }
+  el.querySelector('[data-act="log"]').onclick = (e) => { e.stopPropagation(); openInteractionPanel(null, { member_id: m.id }); };
+  el.querySelector('[data-act="edit"]').onclick = (e) => { e.stopPropagation(); openMemberPanel(m); };
+  el.querySelector('[data-act="ix"]').onclick = (e) => { e.stopPropagation(); filterLogToMember(m.last_name); };
+}
