@@ -863,6 +863,44 @@ console.log("type filter + CSV export + attention feed");
   await req("DELETE", `/api/interactions/${callIx}`);
 }
 
+console.log("member roster CSV + needing-contact + possible-duplicates");
+{
+  const iso = (off) => { const d = new Date(); d.setDate(d.getDate() + off); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; };
+  let r = await req("POST", "/api/members", { chamber: "house", first_name: "Quiet", last_name: "Quieter", party: "R", state: "FL", district: 3, committees: ["Oversight"] });
+  const qid = r.json.id;
+  r = await req("POST", "/api/members", { chamber: "senate", first_name: "Fresh", last_name: "Contact", party: "D", state: "GA", committees: [] });
+  const fid = r.json.id;
+  r = await req("POST", "/api/interactions", { member_id: qid, date: iso(-100), summary: "Old meeting about the harbor bill." });
+  const oldIx = r.json.id;
+  r = await req("POST", "/api/interactions", { member_id: fid, date: iso(-2), summary: "Recent check-in call." });
+  const newIx = r.json.id;
+
+  r = await req("GET", "/api/members/needing-contact");
+  ok("needing-contact -> 200 list", r.status === 200 && Array.isArray(r.json), `got ${r.status}`);
+  ok("stale member flagged", r.json.some(m => m.id === qid && /Quiet/.test(m.member_label || "")), JSON.stringify(r.json.map(m => m.member_label)));
+  ok("fresh member not flagged", !r.json.some(m => m.id === fid), JSON.stringify(r.json.map(m => m.id)));
+
+  r = await req("GET", "/api/members.csv");
+  ok("members CSV -> 200 with header", r.status === 200 && r.text.startsWith("name,chamber,party,state,district,committees"), `got ${r.status}`);
+  ok("members CSV names the member", r.text.includes("Quiet Quieter"), r.text.slice(0, 120));
+  ok("members CSV includes committees", r.text.includes("Oversight"), r.text.slice(0, 200));
+
+  r = await req("GET", `/api/interactions/possible-duplicates?member_id=${qid}&date=${iso(-99)}&summary=${encodeURIComponent("Meeting about the harbor bill")}`);
+  ok("duplicates: similar interaction found", r.status === 200 && r.json.some(x => x.id === oldIx), JSON.stringify(r.json));
+  r = await req("GET", `/api/interactions/possible-duplicates?member_id=${qid}&date=${iso(-99)}&summary=${encodeURIComponent("Meeting about the harbor bill")}&exclude_id=${oldIx}`);
+  ok("duplicates: exclude_id removes self", r.status === 200 && !r.json.some(x => x.id === oldIx), JSON.stringify(r.json));
+  r = await req("GET", `/api/interactions/possible-duplicates?member_id=${fid}&date=${iso(-2)}&summary=${encodeURIComponent("Totally different topic here")}`);
+  ok("duplicates: fresh member with different words -> none", r.status === 200 && r.json.length === 0, JSON.stringify(r.json));
+  r = await req("GET", "/api/interactions/possible-duplicates?member_id=&date=not-a-date&summary=x");
+  ok("duplicates: bad params -> []", r.status === 200 && Array.isArray(r.json) && r.json.length === 0, `got ${r.status}`);
+
+  // cleanup
+  await req("DELETE", `/api/interactions/${oldIx}`);
+  await req("DELETE", `/api/interactions/${newIx}`);
+  await req("DELETE", `/api/members/${qid}`);
+  await req("DELETE", `/api/members/${fid}`);
+}
+
 console.log("logout");
 {
   const r = await req("POST", "/api/logout");

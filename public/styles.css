@@ -773,3 +773,4 @@ table.grid.compact td { padding: 8px 10px; }
 .att-tag.stale { background: #b45309; }
 .att-tag.overdue { background: #b91c1c; }
 .att-tag.upcoming { background: #1d4ed8; }
+.att-tag.touchbase { background: #4f7a6a; }

@@ -318,6 +318,12 @@ async function renderAttentionStrip() {
     `<span class="att-tag overdue">Overdue</span> Task "${esc(t.title)}" (${esc(t.group_name || "")}) was due ${esc(t.due_date)}`));
   (data.upcoming_events || []).forEach(e => items.push(
     `<span class="att-tag upcoming">Upcoming</span> ${esc(e.description)} — ${esc(e.date)} (${esc(e.lead_person || "")})`));
+  try {
+    const quiet = await api("/api/members/needing-contact");
+    (quiet || []).slice(0, 8).forEach(m => items.push(
+      `<span class="att-tag touchbase">Touch base</span> ${esc(m.member_label)} — ${
+        m.last_contact ? `no logged contact since ${esc(fmtDate(m.last_contact))}` : "never contacted on record"}`));
+  } catch { /* strip still renders without the member list */ }
   if (!items.length) return;
   box.innerHTML = `<div class="card attention"><h3>Needs attention</h3><ul>${
     items.slice(0, 12).map(i => `<li>${i}</li>`).join("")
@@ -728,6 +734,7 @@ function openInteractionPanel(existing, prefill) {
     fieldErr(null);
     try {
       let memberId = $("#p-member-combo").querySelector("input").disabled ? null : Number(memberCombo.value);
+      let createdNewMember = false;
       if ($("#p-newm-form").style.display !== "none") {
         const committees = $("#nm-committees").value.split(",").map(s => s.trim()).filter(Boolean);
         const m = await api("/api/members", { method: "POST", body: JSON.stringify({
@@ -738,6 +745,7 @@ function openInteractionPanel(existing, prefill) {
         })});
         memberId = m.id;
         state.members = await api("/api/members");
+        createdNewMember = true;
       }
       if (!memberId) throw new Error("Choose a member or add a new one.");
       const payload = {
@@ -750,21 +758,44 @@ function openInteractionPanel(existing, prefill) {
         interaction_type: ixType || null,
         parent_id: prefill?.parent_id || existing?.parent_id || null,
       };
-      if (isEdit) await api("/api/interactions/" + existing.id, { method: "PUT", body: JSON.stringify(payload) });
-      else await api("/api/interactions", { method: "POST", body: JSON.stringify(payload) });
-      // Follow-up chaining: optionally mark the parent Done.
-      if (!isEdit && prefill?.parent_id && $("#p-markdone")?.checked) {
-        await api(`/api/interactions/${prefill.parent_id}/status`, { method: "POST", body: JSON.stringify({ status: "done" }) });
+      const saveNow = async () => {
+        if (isEdit) await api("/api/interactions/" + existing.id, { method: "PUT", body: JSON.stringify(payload) });
+        else await api("/api/interactions", { method: "POST", body: JSON.stringify(payload) });
+        // Follow-up chaining: optionally mark the parent Done.
+        if (!isEdit && prefill?.parent_id && $("#p-markdone")?.checked) {
+          await api(`/api/interactions/${prefill.parent_id}/status`, { method: "POST", body: JSON.stringify({ status: "done" }) });
+        }
+        pushRecentMember(memberId);
+        if (state.view === "interactions") loadInteractions();
+        if (keepOpen) {
+          toast("Interaction logged.");
+          openInteractionPanel(null, { member_id: memberId, staff_id: payload.staff_id, interaction_type: ixType || null });
+        } else {
+          closePanel();
+          toast(isEdit ? "Interaction updated." : "Interaction logged.");
+        }
+      };
+      // Possible-duplicate guard: same member, same few days, overlapping
+      // summary. Warns, never blocks — the user always decides.
+      if (!createdNewMember) {
+        try {
+          const q = new URLSearchParams({ member_id: String(memberId), date: payload.date, summary: payload.summary });
+          if (isEdit) q.set("exclude_id", String(existing.id));
+          const dupes = await api("/api/interactions/possible-duplicates?" + q.toString());
+          if (dupes.length) {
+            openModal("Possible duplicate",
+              `<p style="margin:0 0 6px">This member already has a similar interaction on record:</p>` +
+              `<ul class="list-plain">` + dupes.slice(0, 3).map(d =>
+                `<li><strong>${esc(d.date)}</strong> — ${esc(d.summary.length > 120 ? d.summary.slice(0, 120) + "…" : d.summary)}</li>`
+              ).join("") + `</ul><p>Log this one anyway?</p>`,
+              `<button class="btn" id="dup-back">Go back</button><button class="btn primary" id="dup-save">Log anyway</button>`);
+            $("#dup-back").onclick = closeModal;
+            $("#dup-save").onclick = async () => { closeModal(); await saveNow(); };
+            return;
+          }
+        } catch { /* duplicate check failed — save anyway */ }
       }
-      pushRecentMember(memberId);
-      if (state.view === "interactions") loadInteractions();
-      if (keepOpen) {
-        toast("Interaction logged.");
-        openInteractionPanel(null, { member_id: memberId, staff_id: payload.staff_id, interaction_type: ixType || null });
-      } else {
-        closePanel();
-        toast(isEdit ? "Interaction updated." : "Interaction logged.");
-      }
+      await saveNow();
     } catch (e) { fieldErr(e.message); }
   };
   $("#p-save").onclick = guard($("#p-save"), () => doSave(false));
@@ -1042,6 +1073,7 @@ async function renderSettings() {
       <div class="card"><div class="pad">
         <h3>Members of Congress</h3>
         <p class="desc">Fix details or remove members. Removal is blocked while interactions or staff history reference a member.</p>
+        <div style="margin-bottom:10px"><button class="btn" id="member-csv-btn">Export roster CSV</button></div>
         <ul class="list-plain" id="member-list"></ul>
       </div></div>
       <div class="card"><div class="pad">
@@ -1194,6 +1226,7 @@ async function loadSettings() {
 
   // Members of Congress: edit details or remove (blocked while referenced).
   state.members = await api("/api/members");
+  $("#member-csv-btn").onclick = () => { window.location.href = "/api/members.csv"; };
   $("#member-list").innerHTML = state.members.length ? state.members.map(m =>
     `<li><span><span class="member-name">${esc(memberLabel(m))}</span> ${chamberBadge(m.chamber)}</span>
      <span><button class="linklike" data-editmember="${m.id}">Edit</button>

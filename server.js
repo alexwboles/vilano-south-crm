@@ -814,6 +814,38 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     res.send("\uFEFF" + lines.join("\r\n"));
   });
 
+  // CSV export of the member roster — chamber, party, state, district,
+  // committees. Read-only; mirrors /api/interactions.csv.
+  app.get("/api/members.csv", (req, res) => {
+    const members = db.prepare("SELECT * FROM members ORDER BY last_name, first_name").all().map(memberWithCommittees);
+    const cell = (v) => '"' + String(v ?? "").replace(/"/g, '""') + '"';
+    const lines = ["name,chamber,party,state,district,committees"];
+    for (const m of members) {
+      lines.push([
+        `${m.first_name} ${m.last_name}`, m.chamber, m.party, m.state,
+        m.district ?? "", (m.committees || []).join("; "),
+      ].map(cell).join(","));
+    }
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", 'attachment; filename="members.csv"');
+    res.send("\uFEFF" + lines.join("\r\n"));
+  });
+
+  // Members with no logged interaction in 90+ days (or ever) — the
+  // "who are we neglecting" list for the attention strip. Read-only.
+  app.get("/api/members/needing-contact", (req, res) => {
+    const rows = db.prepare(`
+      SELECT m.id, m.chamber, m.first_name, m.last_name, m.party, m.state, m.district,
+             MAX(i.date) AS last_contact, COUNT(i.id) AS interaction_count
+      FROM members m LEFT JOIN interactions i ON i.member_id = m.id
+      GROUP BY m.id
+      HAVING last_contact IS NULL OR last_contact < date('now', '-90 days')
+      ORDER BY (last_contact IS NULL) DESC, last_contact ASC, m.last_name, m.first_name
+      LIMIT 50
+    `).all().map((r) => ({ ...r, member_label: memberFullLabel(r) }));
+    res.json(rows);
+  });
+
   // Needs-attention feed: stale open interactions with next steps, overdue
   // tasks, and events in the next 14 days — one call for the dashboard strip.
   app.get("/api/attention", (req, res) => {
@@ -838,6 +870,31 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
       ORDER BY date ASC LIMIT 25
     `).all();
     res.json({ stale_interactions: stale, overdue_tasks: overdue, upcoming_events: upcoming });
+  });
+
+  // Possible-duplicate check: same member, date within ±2 days, overlapping
+  // summary words. Non-blocking — the frontend warns and the user decides.
+  // Read-only. `exclude_id` skips the record being edited.
+  app.get("/api/interactions/possible-duplicates", (req, res) => {
+    const { member_id, date, summary, exclude_id } = req.query;
+    if (!member_id || !validDate(date)) return res.json([]);
+    const words = new Set(String(summary || "").toLowerCase().match(/[a-z]{4,}/g) || []);
+    const rows = db.prepare(`
+      SELECT i.id, i.date, i.summary, i.interaction_type, i.status,
+             m.chamber, m.first_name, m.last_name, m.party, m.state, m.district
+      FROM interactions i JOIN members m ON m.id = i.member_id
+      WHERE i.member_id = ?
+        AND i.date BETWEEN date(?, '-2 days') AND date(?, '+2 days')
+        ${exclude_id ? "AND i.id <> ?" : ""}
+      ORDER BY i.date DESC, i.id DESC LIMIT 10
+    `).all(...(exclude_id ? [member_id, date, date, exclude_id] : [member_id, date, date]));
+    const scored = rows.map((r) => {
+      const rw = new Set(String(r.summary || "").toLowerCase().match(/[a-z]{4,}/g) || []);
+      let overlap = 0;
+      words.forEach((w) => { if (rw.has(w)) overlap++; });
+      return { ...r, member_label: memberFullLabel(r), overlap };
+    }).filter((r) => r.overlap >= 2 || words.size === 0);
+    res.json(scored);
   });
 
   // Follow-ups of one interaction (children in the follow-up chain).
