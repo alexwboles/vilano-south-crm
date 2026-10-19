@@ -77,8 +77,10 @@ Section "Cloudflare Tunnel — free public link for phones (recommended)" SecClo
 SectionEnd
 
 Section "Uninstall"
-  ; Stop the tray if it's running before removing files.
+  ; Stop the tray and the Node server if they're running before removing files
+  ; (an orphaned node.exe would hold the DB/lock files during uninstall).
   ExecWait 'taskkill /F /IM VilanoTray.exe' $0
+  ExecWait 'taskkill /F /IM node.exe' $0
 
   MessageBox MB_YESNO|MB_DEFBUTTON1 "Keep your CRM data (interactions, staff, events, documents)?$\r$\nChoose Yes to keep your records for a future reinstall." IDYES keepdata
     ; No: remove everything including data.

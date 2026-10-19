@@ -467,6 +467,14 @@ select.status-sel:focus { box-shadow: 0 0 0 3px rgba(201, 162, 39, 0.28); }
 }
 .toast.show { opacity: 1; transform: translateX(-50%); }
 
+/* ---------- offline banner ---------- */
+.offline-banner {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 90;
+  background: #7c4a03; color: #fff; border-radius: 0;
+  padding: 8px 16px; font-size: 13px; text-align: center;
+}
+.offline-banner[hidden] { display: none; }
+
 /* ---------- PWA install banner ---------- */
 .install-banner {
   position: fixed; left: 12px; right: 12px; bottom: 12px; z-index: 45;

@@ -13,7 +13,7 @@ import httpMod from "node:http";
 import { fileURLToPath } from "node:url";
 import {
   openDb, bootstrapFreshDb, findUserByEmail, verifyPassword, isAllowed,
-  allowEmail, createUser, setUserPassword, userCount,
+  allowEmail, createUser, setUserPassword, userCount, audit,
   sampleLegislatorCount, loadSampleLegislators, purgeSampleLegislators,
 } from "./db.js";
 import { loadSampleContent, purgeSampleContent, sampleContentLoaded, sampleContentComplete } from "./sample-content.js";
@@ -28,22 +28,38 @@ const PARTIES = ["R", "D", "I"];
 const INTERACTION_TYPES = ["Meeting", "Call", "Email", "Hallway touch"];
 
 // ---- login hardening ----
-// In-memory rate limit: 10 attempts per 15 minutes per IP.
+// In-memory rate limit: 10 attempts per 15 minutes per IP, plus 10 per 15
+// minutes per account (normalized email). The per-account bucket matters
+// because every remote user arrives as 127.0.0.1 behind the Cloudflare tunnel.
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 10;
 const loginAttempts = new Map(); // ip -> { count, resetAt }
-function loginAllowed(ip) {
+const loginAccountAttempts = new Map(); // email -> { count, resetAt }
+function bucketAllowed(map, key) {
   const now = Date.now();
-  let e = loginAttempts.get(ip);
+  let e = map.get(key);
   if (!e || e.resetAt <= now) {
     e = { count: 0, resetAt: now + LOGIN_WINDOW_MS };
-    loginAttempts.set(ip, e);
+    map.set(key, e);
   }
   e.count += 1;
-  if (loginAttempts.size > 2000) {
-    for (const [k, v] of loginAttempts) if (v.resetAt <= now) loginAttempts.delete(k);
+  if (map.size > 2000) {
+    for (const [k, v] of map) if (v.resetAt <= now) map.delete(k);
   }
   return e.count <= LOGIN_MAX_ATTEMPTS;
+}
+function loginAllowed(ip) { return bucketAllowed(loginAttempts, ip); }
+function accountLoginAllowed(email) {
+  return bucketAllowed(loginAccountAttempts, String(email || "").trim().toLowerCase());
+}
+function loginReset(ip, email) {
+  loginAttempts.delete(ip);
+  loginAccountAttempts.delete(String(email || "").trim().toLowerCase());
+}
+// Test hook: clear login rate-limit state so tests are order-independent.
+export function __resetLoginLimits() {
+  loginAttempts.clear();
+  loginAccountAttempts.clear();
 }
 // Dummy scrypt credentials so unknown emails cost the same time as a real
 // password check (no timing oracle for email enumeration).
@@ -53,10 +69,16 @@ const DUMMY_PW = (() => {
   return { salt, hash };
 })();
 
+// Abbreviations that must not end a sentence for the 2-sentence note rule.
+const SENT_ABBR = ["Mr", "Mrs", "Ms", "Dr", "Rep", "Sen", "St", "Jr", "Sr", "Gov", "Gen", "Sgt", "Lt", "Col", "Prof", "Inc", "Ltd", "Co", "etc", "vs", "Ave", "Blvd", "Rd"];
 function countSentences(s) {
   const t = String(s || "").trim();
   if (!t) return 0;
-  return t.split(/[.!?]+/).map(x => x.trim()).filter(Boolean).length;
+  // Protect initials ("T.") and common abbreviations ("Rep.") so they don't
+  // inflate the count, then split on real sentence-ending punctuation.
+  let tmp = t.replace(/\b([A-Za-z])\./g, "$1<prd>");
+  for (const a of SENT_ABBR) tmp = tmp.replace(new RegExp(`\\b${a}\\.`, "gi"), `${a}<prd>`);
+  return tmp.split(/[.!?]+/).map(x => x.replace(/<prd>/g, ".").trim()).filter(Boolean).length;
 }
 
 function validateNote(note) {
@@ -227,26 +249,65 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
         updateState.latest = tag;
         if (tag && cmpVer(tag, APP_VERSION) > 0) {
           const asset = pickUpdateAsset(rel.assets || []);
-          if (asset) downloadUpdate(asset.browser_download_url, tag);
+          const sumAsset = (rel.assets || []).find((a) => /sha256|checksum/i.test(a.name || ""));
+          if (asset) downloadUpdate(asset.browser_download_url, tag, sumAsset ? sumAsset.browser_download_url : null);
         }
       } catch (e) { updateState.error = "Could not read release info."; }
     });
     req.on("error", () => { updateState.checking = false; updateState.error = "Update check failed."; });
   };
-  const downloadUpdate = (url, tag) => {
+  // Downloads the installer, then verifies its SHA-256 against the checksum
+  // file published with the release. Refuses the update when no checksum is
+  // published or the hash doesn't match — never installs an unverified .exe.
+  const sha256File = (file) => new Promise((resolve, reject) => {
+    const h = crypto.createHash("sha256");
+    const s = fs.createReadStream(file);
+    s.on("data", (d) => h.update(d));
+    s.on("end", () => resolve(h.digest("hex")));
+    s.on("error", reject);
+  });
+  const downloadUpdate = (url, tag, checksumUrl) => {
     const dest = path.join(os.tmpdir(), `VilanoCRM-Setup-${tag}.exe`);
     updateState.file = dest;
     const file = fs.createWriteStream(dest);
+    file.on("error", () => { updateState.error = "Download failed."; updateState.file = null; });
+    file.on("finish", () => verifyUpdate(dest, tag, checksumUrl));
     httpsGet(url, { "User-Agent": "vilano-crm" }, (res, body) => {}, file)
-      .on("error", () => { updateState.error = "Download failed."; updateState.file = null; })
-      .on("close", () => {
-        try {
-          if (fs.statSync(dest).size > 10 * 1024 * 1024) {
-            updateState.ready = true;
-            console.log(`Update ${tag} downloaded — ready to install.`);
-          }
-        } catch {}
+      .on("error", () => { updateState.error = "Download failed."; updateState.file = null; });
+  };
+  const verifyUpdate = async (dest, tag, checksumUrl) => {
+    try {
+      if (fs.statSync(dest).size < 10 * 1024 * 1024) {
+        updateState.error = "Downloaded update is too small — discarded.";
+        updateState.file = null;
+        return;
+      }
+      if (!checksumUrl) {
+        updateState.error = "Update refused: no checksum published with this release.";
+        updateState.file = null;
+        try { fs.unlinkSync(dest); } catch {}
+        return;
+      }
+      const sumBody = await new Promise((resolve, reject) => {
+        httpsGet(checksumUrl, { "User-Agent": "vilano-crm" }, (res, body) => resolve(body || ""))
+          .on("error", reject);
       });
+      const want = String(sumBody).split("\n")
+        .map((l) => l.trim().split(/\s+/))
+        .find((p) => p.length >= 2 && /vilano.*setup.*\.exe$/i.test(p[1] || ""));
+      const got = await sha256File(dest);
+      if (want && want[0].toLowerCase() === got.toLowerCase()) {
+        updateState.ready = true;
+        console.log(`Update ${tag} downloaded and checksum-verified — ready to install.`);
+      } else {
+        updateState.error = "Update refused: checksum mismatch.";
+        updateState.file = null;
+        try { fs.unlinkSync(dest); } catch {}
+      }
+    } catch {
+      updateState.error = "Update verification failed.";
+      updateState.file = null;
+    }
   };
   // Minimal https GET helper (follows one redirect, no deps).
   function httpsGet(url, headers, onDone, pipeTo) {
@@ -296,15 +357,19 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
       return;
     }
     let args;
+    let childEnv = null;
     if (token && hostname) {
-      args = ["tunnel", "run", "--token", token];
+      // Pass the token via the TUNNEL_TOKEN env var — never as a CLI argument,
+      // so it doesn't show up in the Windows process list.
+      args = ["tunnel", "run"];
+      childEnv = { ...process.env, TUNNEL_TOKEN: token };
       publicUrl = `https://${hostname}`;
       console.log(`Public phone link: ${publicUrl} (named tunnel)`);
     } else {
       args = ["tunnel", "--url", `http://127.0.0.1:${p}`];
     }
     try {
-      const cf = spawn(exe, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      const cf = spawn(exe, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true, ...(childEnv ? { env: childEnv } : {}) });
       cfProc = cf;
       let buf = "";
       const onData = (d) => {
@@ -334,16 +399,48 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     req.user = null;
     const token = parseCookies(req).vs_session;
     if (token) {
-      const s = db.prepare("SELECT user_id, expires_at FROM sessions WHERE token = ?").get(token);
+      const s = db.prepare("SELECT user_id, expires_at, csrf FROM sessions WHERE token = ?").get(token);
       if (s && new Date(s.expires_at).getTime() > Date.now()) {
-        const u = db.prepare("SELECT id, email, created_at FROM users WHERE id = ?").get(s.user_id);
-        if (u) req.user = u;
+        const u = db.prepare("SELECT id, email, role, created_at FROM users WHERE id = ?").get(s.user_id);
+        if (u) req.user = { ...u, csrf: s.csrf || "" };
       } else if (s) {
         db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
       }
     }
     next();
   });
+
+  // ---- CSRF: synchronizer token ----
+  // Issued at login (and readable via /api/me); required as the X-CSRF-Token
+  // header on every state-changing API call. SameSite=Lax cookies stay as-is.
+  // /api/login and /api/setup are exempt — they run before a session exists.
+  const CSRF_METHODS = new Set(["POST", "PUT", "DELETE", "PATCH"]);
+  app.use((req, res, next) => {
+    if (CSRF_METHODS.has(req.method) && req.path.startsWith("/api/") &&
+        req.path !== "/api/login" && req.path !== "/api/setup") {
+      // Unauthenticated: let the auth layer answer 401. Authenticated but
+      // wrong/missing token: 403.
+      if (!req.user) return next();
+      const sent = req.headers["x-csrf-token"];
+      if (!req.user.csrf || !sent || sent !== req.user.csrf) {
+        return res.status(403).json({ error: "bad csrf token" });
+      }
+    }
+    next();
+  });
+
+  const requireAdmin = (req, res, next) => {
+    if (!req.user) return res.status(401).json({ error: "unauthorized" });
+    if (req.user.role !== "admin") return res.status(403).json({ error: "admin only" });
+    next();
+  };
+
+  // ---- session hygiene: sweep expired sessions hourly, plus once at boot ----
+  const sweepSessions = () => {
+    try { db.prepare("DELETE FROM sessions WHERE expires_at <= datetime('now')").run(); } catch {}
+  };
+  setImmediate(sweepSessions);
+  setInterval(sweepSessions, 60 * 60 * 1000);
 
   // ---- document upload: own larger JSON body parser, registered before the
   // tight global one below so big-but-allowed files reach the handler ----
@@ -382,10 +479,11 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     next();
   };
 
-  app.post("/api/update-install", requireAuth, (req, res) => {
+  app.post("/api/admin/update-install", requireAdmin, (req, res) => {
     if (!updateState.ready || !updateState.file || !fs.existsSync(updateState.file)) {
       return res.status(400).json({ error: "No update downloaded yet." });
     }
+    audit(db, req.user, "update-install", "app", updateState.latest, `Installed update ${updateState.latest}`);
     res.json({ ok: true });
     // Launch the installer, then get out of its way. It closes the tray/server itself.
     setTimeout(() => {
@@ -430,8 +528,9 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     res.sendFile(path.join(__dirname, "public", "setup.js"));
   });
   // Whether the demo account exists — lets login.html hide its demo hint.
+  // The demo account can only exist when VILANO_DEV_DEMO=1 (dev only).
   app.get("/api/demo-available", (req, res) => {
-    res.json({ demo: !!findUserByEmail(db, "demo@vilano.local") });
+    res.json({ demo: process.env.VILANO_DEV_DEMO === "1" && !!findUserByEmail(db, "demo@vilano.local") });
   });
   app.post("/api/setup", (req, res) => {
     if (!needsSetup()) return res.status(409).json({ error: "Setup is already complete." });
@@ -461,12 +560,13 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
 
   // ---- auth ----
   app.post("/api/login", (req, res) => {
-    if (!loginAllowed(req.ip)) {
+    const { email, password } = req.body || {};
+    const normEmail = String(email || "").trim().toLowerCase();
+    if (!loginAllowed(req.ip) || !accountLoginAllowed(normEmail)) {
       res.set("Retry-After", "900");
       return res.status(429).json({ error: "Too many sign-in attempts. Try again later." });
     }
-    const { email, password } = req.body || {};
-    const user = findUserByEmail(db, String(email || ""));
+    const user = findUserByEmail(db, normEmail);
     // Always run the scrypt comparison — even for unknown emails — so the
     // failure time doesn't reveal whether an email is registered.
     const pwOk = user
@@ -476,14 +576,18 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     if (!user || !pwOk) {
       return res.status(401).json({ error: "Invalid email or password." });
     }
-    loginAttempts.delete(req.ip); // successful login resets the counter
+    loginReset(req.ip, normEmail); // successful login resets both counters
+    // Multiple concurrent sessions are allowed: users can stay signed in
+    // on phone and computer at the same time.
     const token = crypto.randomBytes(32).toString("hex");
+    const csrf = crypto.randomBytes(16).toString("hex");
     const expires = new Date(Date.now() + SESSION_TTL_MS).toISOString().slice(0, 19).replace("T", " ");
-    db.prepare("INSERT INTO sessions (token, user_id, expires_at) VALUES (?,?,?)").run(token, user.id, expires);
+    db.prepare("INSERT INTO sessions (token, user_id, expires_at, user_agent, ip, csrf) VALUES (?,?,?,?,?,?)")
+      .run(token, user.id, expires, String(req.headers["user-agent"] || "").slice(0, 300), req.ip || "", csrf);
     const secure = req.secure || req.headers["x-forwarded-proto"] === "https";
     res.setHeader("Set-Cookie",
       `vs_session=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${SESSION_TTL_MS / 1000}${secure ? "; Secure" : ""}`);
-    res.json({ ok: true, email: user.email });
+    res.json({ ok: true, email: user.email, role: user.role || "user", csrf });
   });
 
   app.post("/api/logout", requireAuth, (req, res) => {
@@ -493,7 +597,25 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     res.json({ ok: true });
   });
 
-  app.get("/api/me", requireAuth, (req, res) => res.json({ email: req.user.email }));
+  app.get("/api/me", requireAuth, (req, res) => res.json({ email: req.user.email, role: req.user.role || "user", csrf: req.user.csrf || "" }));
+
+  // ---- sessions: list + revoke your own ----
+  app.get("/api/sessions", requireAuth, (req, res) => {
+    const me = parseCookies(req).vs_session;
+    const rows = db.prepare(
+      "SELECT rowid AS id, user_agent, ip, created_at, expires_at, CASE WHEN token = ? THEN 1 ELSE 0 END AS current FROM sessions WHERE user_id = ? ORDER BY created_at DESC"
+    ).all(me || "", req.user.id);
+    res.json(rows.map((r) => ({ ...r, token: undefined })));
+  });
+
+  app.delete("/api/sessions/:id", requireAuth, (req, res) => {
+    const me = parseCookies(req).vs_session;
+    const row = db.prepare("SELECT token FROM sessions WHERE rowid = ? AND user_id = ?").get(req.params.id, req.user.id);
+    if (!row) return res.status(404).json({ error: "not-found" });
+    if (row.token === me) return bad(res, "You can't revoke the session you're using. Sign out instead.");
+    db.prepare("DELETE FROM sessions WHERE rowid = ?").run(req.params.id);
+    res.json({ ok: true });
+  });
 
   // ---- everything below requires auth ----
   // (mounted guard: req.path is mount-relative here, so always 401 for API)
@@ -579,6 +701,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     const id = Number(r.lastInsertRowid);
     const ins = db.prepare("INSERT INTO member_committees (member_id, name) VALUES (?,?)");
     for (const c of dedupeCommittees(committees)) ins.run(id, c);
+    audit(db, req.user, "create", "member", id, memberFullLabel({ chamber, first_name: first_name.trim(), last_name: last_name.trim(), party, state: String(state).toUpperCase(), district: dist }));
     res.status(201).json(memberWithCommittees(db.prepare("SELECT * FROM members WHERE id = ?").get(id)));
   });
 
@@ -597,6 +720,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     db.prepare("DELETE FROM member_committees WHERE member_id = ?").run(cur.id);
     const ins = db.prepare("INSERT INTO member_committees (member_id, name) VALUES (?,?)");
     for (const c of dedupeCommittees(committees)) ins.run(cur.id, c);
+    audit(db, req.user, "update", "member", cur.id, memberFullLabel({ chamber, first_name: first_name.trim(), last_name: last_name.trim(), party, state: String(state).toUpperCase(), district: dist }));
     res.json(memberWithCommittees(db.prepare("SELECT * FROM members WHERE id = ?").get(cur.id)));
   });
 
@@ -612,6 +736,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
       return bad(res, "Cannot delete: this member has interactions or staff assignments on record.");
     }
     db.prepare("DELETE FROM members WHERE id = ?").run(cur.id);
+    audit(db, req.user, "delete", "member", cur.id, "");
     res.json({ ok: true });
   });
 
@@ -688,7 +813,9 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
       "INSERT INTO staff (first_name, last_name, title, email, phone, notes) VALUES (?,?,?,?,?,?)"
     ).run(first_name.trim(), last_name.trim(), String(title || "").trim(),
       String(email || "").trim(), String(phone || "").trim(), String(notes || "").trim());
-    res.status(201).json(staffWithCurrent(db.prepare("SELECT * FROM staff WHERE id = ?").get(r.lastInsertRowid)));
+    const sid = Number(r.lastInsertRowid);
+    audit(db, req.user, "create", "staff", sid, `${first_name.trim()} ${last_name.trim()}`);
+    res.status(201).json(staffWithCurrent(db.prepare("SELECT * FROM staff WHERE id = ?").get(sid)));
   });
 
   app.put("/api/staff/:id", (req, res) => {
@@ -700,6 +827,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     db.prepare("UPDATE staff SET first_name=?, last_name=?, title=?, email=?, phone=?, notes=? WHERE id=?")
       .run(first_name.trim(), last_name.trim(), String(title || "").trim(),
         String(email || "").trim(), String(phone || "").trim(), String(notes || "").trim(), cur.id);
+    audit(db, req.user, "update", "staff", cur.id, `${first_name.trim()} ${last_name.trim()}`);
     res.json(staffWithCurrent(db.prepare("SELECT * FROM staff WHERE id = ?").get(cur.id)));
   });
 
@@ -713,6 +841,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
       return bad(res, "Cannot delete: this staffer has assignments or interactions on record. End their assignments instead.");
     }
     db.prepare("DELETE FROM staff WHERE id = ?").run(cur.id);
+    audit(db, req.user, "delete", "staff", cur.id, `${cur.first_name} ${cur.last_name}`);
     res.json({ ok: true });
   });
 
@@ -723,7 +852,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     const { member_id, started_on } = req.body || {};
     const member = db.prepare("SELECT id FROM members WHERE id = ?").get(member_id);
     if (!member) return bad(res, "Member is required.");
-    const start = started_on || new Date().toISOString().slice(0, 10);
+    const start = started_on || (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
     if (!validDate(start)) return bad(res, "Start date must be YYYY-MM-DD.");
     const dup = db.prepare(
       "SELECT 1 FROM staff_assignments WHERE staff_id = ? AND member_id = ? AND ended_on IS NULL"
@@ -742,7 +871,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     const a = db.prepare("SELECT * FROM staff_assignments WHERE id = ?").get(req.params.id);
     if (!a) return res.status(404).json({ error: "not-found" });
     if (a.ended_on !== null) return bad(res, "This assignment has already ended.");
-    const end = req.body?.ended_on || new Date().toISOString().slice(0, 10);
+    const end = req.body?.ended_on || (() => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; })();
     if (!validDate(end)) return bad(res, "End date must be YYYY-MM-DD.");
     if (end < a.started_on) return bad(res, "End date cannot be before the start date.");
     db.prepare("UPDATE staff_assignments SET ended_on = ? WHERE id = ?").run(end, a.id);
@@ -893,7 +1022,9 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
       let overlap = 0;
       words.forEach((w) => { if (rw.has(w)) overlap++; });
       return { ...r, member_label: memberFullLabel(r), overlap };
-    }).filter((r) => r.overlap >= 2 || words.size === 0);
+    // Require real word overlap: an empty summary must never flag everything
+    // in the ±2-day window as a "possible duplicate".
+    }).filter((r) => words.size > 0 && r.overlap >= 2);
     res.json(scored);
   });
 
@@ -918,6 +1049,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     const { status } = req.body || {};
     if (!STATUSES.includes(status)) return bad(res, "Invalid status.");
     db.prepare("UPDATE interactions SET status = ? WHERE id = ?").run(status, cur.id);
+    audit(db, req.user, "status", "interaction", cur.id, `status -> ${status}`);
     res.json({ ok: true });
   });
 
@@ -976,7 +1108,9 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     if (!ex.ok) return ex.res;
     const r = db.prepare("INSERT INTO interactions (member_id, date, summary, next_step, status, staff_id, interaction_type, parent_id) VALUES (?,?,?,?,?,?,?,?)")
       .run(member_id, date, summary.trim(), String(next_step || "").trim() || null, status || "open", st.id, ex.type, ex.parent);
-    res.status(201).json({ id: Number(r.lastInsertRowid) });
+    const ixId = Number(r.lastInsertRowid);
+    audit(db, req.user, "create", "interaction", ixId, `member ${member_id}, ${date}: ${summary.trim().slice(0, 80)}`);
+    res.status(201).json({ id: ixId });
   });
 
   app.put("/api/interactions/:id", (req, res) => {
@@ -994,12 +1128,14 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     if (!ex.ok) return ex.res;
     db.prepare("UPDATE interactions SET member_id=?, date=?, summary=?, next_step=?, status=?, staff_id=?, interaction_type=?, parent_id=? WHERE id=?")
       .run(member_id, date, summary.trim(), String(next_step || "").trim() || null, status || "open", st.id, ex.type, ex.parent, cur.id);
+    audit(db, req.user, "update", "interaction", cur.id, `${date}: ${summary.trim().slice(0, 80)}`);
     res.json({ ok: true });
   });
 
   app.delete("/api/interactions/:id", (req, res) => {
     const r = db.prepare("DELETE FROM interactions WHERE id = ?").run(req.params.id);
     if (!r.changes) return res.status(404).json({ error: "not-found" });
+    audit(db, req.user, "delete", "interaction", req.params.id, "");
     res.json({ ok: true });
   });
 
@@ -1024,7 +1160,9 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     if (!String(lead_person || "").trim()) return bad(res, "Lead person is required.");
     const r = db.prepare("INSERT INTO events (date, description, lead_person) VALUES (?,?,?)")
       .run(date, description.trim(), lead_person.trim());
-    res.status(201).json({ id: Number(r.lastInsertRowid) });
+    const evId = Number(r.lastInsertRowid);
+    audit(db, req.user, "create", "event", evId, `${date}: ${description.trim().slice(0, 80)}`);
+    res.status(201).json({ id: evId });
   });
 
   app.put("/api/events/:id", (req, res) => {
@@ -1036,12 +1174,14 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     if (!String(lead_person || "").trim()) return bad(res, "Lead person is required.");
     db.prepare("UPDATE events SET date=?, description=?, lead_person=? WHERE id=?")
       .run(date, description.trim(), lead_person.trim(), cur.id);
+    audit(db, req.user, "update", "event", cur.id, `${date}: ${description.trim().slice(0, 80)}`);
     res.json({ ok: true });
   });
 
   app.delete("/api/events/:id", (req, res) => {
     const r = db.prepare("DELETE FROM events WHERE id = ?").run(req.params.id);
     if (!r.changes) return res.status(404).json({ error: "not-found" });
+    audit(db, req.user, "delete", "event", req.params.id, "");
     res.json({ ok: true });
   });
 
@@ -1233,36 +1373,40 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
   });
 
   // ---- admin: allowlist + users ----
-  app.get("/api/admin/allowed", (req, res) => {
+  const countsOf = (o) => Object.values(o || {}).reduce((a, b) => a + (Number(b) || 0), 0);
+  app.get("/api/admin/allowed", requireAdmin, (req, res) => {
     res.json(db.prepare("SELECT email, added_at FROM allowed_emails ORDER BY email").all());
   });
 
-  app.post("/api/admin/allowed", (req, res) => {
+  app.post("/api/admin/allowed", requireAdmin, (req, res) => {
     try {
       const email = allowEmail(db, req.body?.email || "");
+      audit(db, req.user, "allowlist-add", "allowlist", email, "");
       res.status(201).json({ email });
     } catch {
       return bad(res, "Enter a valid email address.");
     }
   });
 
-  app.delete("/api/admin/allowed/:email", (req, res) => {
+  app.delete("/api/admin/allowed/:email", requireAdmin, (req, res) => {
     const email = decodeURIComponent(req.params.email).toLowerCase();
     if (db.prepare("SELECT 1 FROM users WHERE email=?").get(email)) {
       return bad(res, "That email has a user account; remove the user first.");
     }
     db.prepare("DELETE FROM allowed_emails WHERE email=?").run(email);
+    audit(db, req.user, "allowlist-remove", "allowlist", email, "");
     res.json({ ok: true });
   });
 
-  app.get("/api/admin/users", (req, res) => {
+  app.get("/api/admin/users", requireAdmin, (req, res) => {
     res.json(db.prepare("SELECT id, email, created_at FROM users ORDER BY email").all());
   });
 
-  app.post("/api/admin/users", (req, res) => {
+  app.post("/api/admin/users", requireAdmin, (req, res) => {
     const { email, password } = req.body || {};
     try {
       const id = createUser(db, email, password);
+      audit(db, req.user, "create", "user", id, String(email || "").trim().toLowerCase());
       res.status(201).json({ id });
     } catch (e) {
       if (e.message === "not-allowlisted") return bad(res, "Email is not on the approved list.");
@@ -1272,28 +1416,31 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     }
   });
 
-  app.post("/api/admin/users/:id/password", (req, res) => {
-    const u = db.prepare("SELECT id FROM users WHERE id=?").get(req.params.id);
+  app.post("/api/admin/users/:id/password", requireAdmin, (req, res) => {
+    const u = db.prepare("SELECT id, email FROM users WHERE id=?").get(req.params.id);
     if (!u) return res.status(404).json({ error: "not-found" });
     try {
       setUserPassword(db, u.id, req.body?.password || "");
       db.prepare("DELETE FROM sessions WHERE user_id=?").run(u.id); // force re-login
+      audit(db, req.user, "password-reset", "user", u.id, u.email);
       res.json({ ok: true });
     } catch {
       return bad(res, "Password must be at least 8 characters.");
     }
   });
 
-  app.delete("/api/admin/users/:id", (req, res) => {
+  app.delete("/api/admin/users/:id", requireAdmin, (req, res) => {
     if (Number(req.params.id) === req.user.id) return bad(res, "You cannot remove your own account.");
+    const u = db.prepare("SELECT email FROM users WHERE id=?").get(req.params.id);
     const r = db.prepare("DELETE FROM users WHERE id=?").run(req.params.id);
     if (!r.changes) return res.status(404).json({ error: "not-found" });
+    audit(db, req.user, "delete", "user", req.params.id, u?.email || "");
     res.json({ ok: true });
   });
 
   // ---- admin: sample dataset (real legislator roster + demo content) ----
   // Everything is flagged is_sample=1; the purge never touches real records.
-  app.get("/api/admin/sample-legislators", (req, res) => {
+  app.get("/api/admin/sample-legislators", requireAdmin, (req, res) => {
     res.json({ count: sampleLegislatorCount(db), content: sampleContentLoaded(db), full: sampleDatasetFull(db) });
   });
 
@@ -1304,22 +1451,23 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
   const setMeta = (k, v) => {
     db.prepare("INSERT OR REPLACE INTO meta (k, v) VALUES (?, ?)").run(k, v);
   };
-  app.get("/api/admin/tunnel", (req, res) => {
+  app.get("/api/admin/tunnel", requireAdmin, (req, res) => {
     res.json({
       hostname: getMeta("tunnel_hostname") || "",
       linked: !!(getMeta("tunnel_token") && getMeta("tunnel_hostname")),
       live: publicUrl,
     });
   });
-  app.post("/api/admin/tunnel", (req, res) => {
+  app.post("/api/admin/tunnel", requireAdmin, (req, res) => {
     const { token, hostname } = req.body || {};
     if (token !== undefined) setMeta("tunnel_token", String(token || "").trim());
     if (hostname !== undefined) setMeta("tunnel_hostname", String(hostname || "").trim().replace(/^https?:\/\//, "").replace(/\/$/, ""));
+    audit(db, req.user, "tunnel-config", "tunnel", null, hostname ? `hostname set: ${String(hostname).trim()}` : "disconnected");
     startTunnel();
     res.json({ ok: true, live: publicUrl });
   });
 
-  app.post("/api/admin/sample-legislators", (req, res) => {
+  app.post("/api/admin/sample-legislators", requireAdmin, (req, res) => {
     let legislators;
     try {
       legislators = JSON.parse(fs.readFileSync(path.join(__dirname, "legislators.json"), "utf8"));
@@ -1332,16 +1480,179 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     if (!leg.skipped || sampleLegislatorCount(db) > 0) {
       content = loadSampleContent(db, uploads);
     }
+    audit(db, req.user, "load", "sample-data", null, `${leg.loaded || 0} legislators`);
     res.json({ legislators: leg, content });
   });
 
-  app.delete("/api/admin/sample-legislators", (req, res) => {
+  app.delete("/api/admin/sample-legislators", requireAdmin, (req, res) => {
     const content = purgeSampleContent(db, uploads);
     const legislators = purgeSampleLegislators(db);
+    audit(db, req.user, "purge", "sample-data", null,
+      `Purged sample data: ${legislators.deleted} legislators, ${JSON.stringify(countsOf(content))}`);
     res.json({ legislators, content });
   });
 
-  app.post("/api/admin/password", requireAuth, (req, res) => {
+  // ---- admin: audit log (who changed what, when) ----
+  app.get("/api/admin/audit", requireAdmin, (req, res) => {
+    const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+    res.json(db.prepare("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?").all(limit));
+  });
+
+  // ---- admin: CSV import of interactions ----
+  // Accepts { csv } with header: member,date,type,summary,follow_up
+  // member matches "First Last" (case-insensitive). Per-row validation;
+  // returns { imported, errors: [{ row, error }], total }.
+  const parseCsv = (text) => {
+    const rows = [];
+    let row = [], field = "", inQ = false;
+    const src = String(text || "").replace(/^\uFEFF/, "");
+    for (let i = 0; i < src.length; i++) {
+      const c = src[i];
+      if (inQ) {
+        if (c === '"') {
+          if (src[i + 1] === '"') { field += '"'; i++; }
+          else inQ = false;
+        } else field += c;
+      } else if (c === '"') inQ = true;
+      else if (c === ",") { row.push(field); field = ""; }
+      else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+      else if (c !== "\r") field += c;
+    }
+    row.push(field);
+    if (!(row.length === 1 && row[0].trim() === "")) rows.push(row);
+    return rows;
+  };
+  app.post("/api/admin/import-interactions", requireAdmin, (req, res) => {
+    const rows = parseCsv(req.body?.csv);
+    if (!rows.length) return bad(res, "No CSV data received.");
+    const header = rows[0].map((h) => h.trim().toLowerCase());
+    const need = ["member", "date", "summary"];
+    for (const n of need) {
+      if (!header.includes(n)) return bad(res, `CSV must have a "${n}" column.`);
+    }
+    const ci = (n) => header.indexOf(n);
+    const memberByName = new Map(
+      db.prepare("SELECT id, first_name, last_name FROM members").all()
+        .map((m) => [`${m.first_name} ${m.last_name}`.toLowerCase(), m.id])
+    );
+    const ins = db.prepare(
+      "INSERT INTO interactions (member_id, date, summary, next_step, status, interaction_type) VALUES (?,?,?,?,?,?)"
+    );
+    let imported = 0;
+    const errors = [];
+    rows.slice(1).forEach((r, i) => {
+      const line = i + 2;
+      if (r.every((c) => !String(c || "").trim())) return; // skip blank lines
+      const get = (n) => (ci(n) >= 0 ? String(r[ci(n)] || "").trim() : "");
+      const memberName = get("member").toLowerCase();
+      const date = get("date"), summary = get("summary");
+      const type = get("type"), followUp = get("follow_up");
+      const memberId = memberByName.get(memberName);
+      if (!memberId) { errors.push({ row: line, error: `Member not found: "${get("member")}".` }); return; }
+      if (!validDate(date)) { errors.push({ row: line, error: `Bad date "${date}" — use YYYY-MM-DD.` }); return; }
+      if (!summary) { errors.push({ row: line, error: "Summary is required." }); return; }
+      if (type && !INTERACTION_TYPES.includes(type)) {
+        errors.push({ row: line, error: `Bad type "${type}" — use one of: ${INTERACTION_TYPES.join(", ")}.` }); return;
+      }
+      try {
+        const rid = ins.run(memberId, date, summary, followUp || null, "open", type || null).lastInsertRowid;
+        imported++;
+        audit(db, req.user, "import", "interaction", Number(rid), `CSV row ${line}: ${summary.slice(0, 60)}`);
+      } catch {
+        errors.push({ row: line, error: "Could not save this row." });
+      }
+    });
+    res.json({ imported, errors, total: rows.length - 1 });
+  });
+
+  // ---- minimal ZIP writer (stored entries, no compression, no deps) ----
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let n = 0; n < 256; n++) {
+      let c = n;
+      for (let k = 0; k < 8; k++) c = (c & 1) ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+  const crc32 = (buf) => {
+    let c = 0xffffffff;
+    for (let i = 0; i < buf.length; i++) c = CRC_TABLE[(c ^ buf[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const buildZip = (entries) => {
+    const chunks = [], central = [];
+    let offset = 0;
+    for (const { name, data } of entries) {
+      const nameBuf = Buffer.from(name, "utf8");
+      const crc = crc32(data);
+      const lh = Buffer.alloc(30);
+      lh.writeUInt32LE(0x04034b50, 0);
+      lh.writeUInt16LE(20, 4);
+      lh.writeUInt16LE(0x0800, 6); // UTF-8 filenames
+      lh.writeUInt16LE(0, 8); // stored
+      lh.writeUInt32LE(crc, 14);
+      lh.writeUInt32LE(data.length, 18);
+      lh.writeUInt32LE(data.length, 22);
+      lh.writeUInt16LE(nameBuf.length, 26);
+      chunks.push(lh, nameBuf, data);
+      central.push({ nameBuf, crc, size: data.length, offset });
+      offset += 30 + nameBuf.length + data.length;
+    }
+    const cdStart = offset;
+    let cdSize = 0;
+    for (const e of central) {
+      const ch = Buffer.alloc(46);
+      ch.writeUInt32LE(0x02014b50, 0);
+      ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6);
+      ch.writeUInt16LE(0x0800, 8);
+      ch.writeUInt16LE(0, 10);
+      ch.writeUInt32LE(e.crc, 16);
+      ch.writeUInt32LE(e.size, 20);
+      ch.writeUInt32LE(e.size, 24);
+      ch.writeUInt16LE(e.nameBuf.length, 28);
+      ch.writeUInt32LE(e.offset, 42);
+      chunks.push(ch, e.nameBuf);
+      cdSize += 46 + e.nameBuf.length;
+    }
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(central.length, 8);
+    end.writeUInt16LE(central.length, 10);
+    end.writeUInt32LE(cdSize, 12);
+    end.writeUInt32LE(cdStart, 16);
+    chunks.push(end);
+    return Buffer.concat(chunks);
+  };
+
+  // ---- admin: one-click backup (zip of the database + uploaded files) ----
+  app.get("/api/admin/backup", requireAdmin, (req, res) => {
+    try {
+      const dbPath = process.env.DB_PATH || path.join(__dirname, "data", "vilano.db");
+      // VACUUM INTO gives a consistent snapshot even while the app is running.
+      const snap = path.join(os.tmpdir(), `vilano-backup-${Date.now()}.db`);
+      db.exec(`VACUUM INTO '${snap.replace(/'/g, "''")}'`);
+      const entries = [{ name: "vilano.db", data: fs.readFileSync(snap) }];
+      try { fs.unlinkSync(snap); } catch {}
+      for (const f of fs.readdirSync(uploads)) {
+        const full = path.join(uploads, f);
+        try {
+          if (fs.statSync(full).isFile()) entries.push({ name: `uploads/${f}`, data: fs.readFileSync(full) });
+        } catch { /* skip unreadable files */ }
+      }
+      const zip = buildZip(entries);
+      audit(db, req.user, "backup", "app", null, `${entries.length} files, ${zip.length} bytes`);
+      const stamp = new Date().toISOString().slice(0, 19).replace(/[-:T]/g, "");
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition", `attachment; filename="vilano-crm-backup-${stamp}.zip"`);
+      res.send(zip);
+    } catch (e) {
+      res.status(500).json({ error: "Backup failed." });
+    }
+  });
+
+  // Change-my-password: every signed-in user (not admin-only).
+  app.post("/api/password", requireAuth, (req, res) => {
     try {
       setUserPassword(db, req.user.id, req.body?.password || "");
       // Invalidate every *other* session; the current one stays signed in.

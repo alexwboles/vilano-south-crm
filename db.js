@@ -35,6 +35,17 @@ export function initSchema(db) {
       expires_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      email TEXT NOT NULL DEFAULT '',
+      action TEXT NOT NULL,
+      entity TEXT NOT NULL DEFAULT '',
+      entity_id TEXT,
+      detail TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS members (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       chamber TEXT NOT NULL CHECK (chamber IN ('house','senate')),
@@ -126,9 +137,28 @@ export function initSchema(db) {
     );
     CREATE UNIQUE INDEX IF NOT EXISTS ux_staff_assign_current
       ON staff_assignments (staff_id, member_id) WHERE ended_on IS NULL;
+    CREATE INDEX IF NOT EXISTS ix_audit_log_created ON audit_log(created_at);
+    CREATE INDEX IF NOT EXISTS ix_interactions_member_date ON interactions(member_id, date);
+    CREATE INDEX IF NOT EXISTS ix_users_email ON users(email);
   `);
   // Migrations for databases created before these columns/tables existed.
   try { db.exec("ALTER TABLE project_groups ADD COLUMN show_on_pager INTEGER NOT NULL DEFAULT 1"); }
+  catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  // Role-based access: the very first account ever created is the admin.
+  // On migration, the earliest-created user (lowest id) is promoted.
+  let roleIsNew = false;
+  try { db.exec("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'"); roleIsNew = true; }
+  catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  if (roleIsNew) {
+    try { db.exec("UPDATE users SET role = 'admin' WHERE id = (SELECT MIN(id) FROM users)"); }
+    catch { /* no users yet — first setup user becomes admin in createUser */ }
+  }
+  // Session metadata for the session-management UI + synchronizer CSRF token.
+  try { db.exec("ALTER TABLE sessions ADD COLUMN user_agent TEXT NOT NULL DEFAULT ''"); }
+  catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  try { db.exec("ALTER TABLE sessions ADD COLUMN ip TEXT NOT NULL DEFAULT ''"); }
+  catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
+  try { db.exec("ALTER TABLE sessions ADD COLUMN csrf TEXT NOT NULL DEFAULT ''"); }
   catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
   try { db.exec("ALTER TABLE interactions ADD COLUMN staff_id INTEGER REFERENCES staff(id) ON DELETE SET NULL"); }
   catch (e) { if (!/duplicate column/i.test(e.message)) throw e; }
@@ -185,13 +215,31 @@ export function createUser(db, email, password) {
   if (!isAllowed(db, e)) throw new Error("not-allowlisted");
   if (typeof password !== "string" || password.length < 8) throw new Error("weak-password");
   const { salt, hash } = hashPassword(password);
+  // The first account ever created is the admin; everyone else is a regular user.
+  const role = userCount(db) === 0 ? "admin" : "user";
   try {
-    const r = db.prepare("INSERT INTO users (email, pw_salt, pw_hash) VALUES (?,?,?)").run(e, salt, hash);
+    const r = db.prepare("INSERT INTO users (email, pw_salt, pw_hash, role) VALUES (?,?,?,?)").run(e, salt, hash, role);
     return Number(r.lastInsertRowid);
   } catch (err) {
     if (String(err.message).includes("UNIQUE")) throw new Error("exists");
     throw err;
   }
+}
+
+// ---- audit log ----
+export function audit(db, user, action, entity, entity_id, detail) {
+  try {
+    db.prepare(
+      "INSERT INTO audit_log (user_id, email, action, entity, entity_id, detail) VALUES (?,?,?,?,?,?)"
+    ).run(
+      user?.id ?? null,
+      user?.email ?? "",
+      String(action || ""),
+      String(entity || ""),
+      entity_id == null ? null : String(entity_id),
+      String(detail || "")
+    );
+  } catch { /* audit must never break the request */ }
 }
 
 export function findUserByEmail(db, email) {
@@ -208,11 +256,14 @@ export function setUserPassword(db, userId, password) {
   db.prepare("UPDATE users SET pw_salt = ?, pw_hash = ? WHERE id = ?").run(salt, hash, userId);
 }
 
-// ---- demo bootstrap (clearly labeled; runs only on a fresh DB) ----
+// ---- demo bootstrap (DEV ONLY) ----
+// The demo account exists only when the explicit VILANO_DEV_DEMO=1 flag is
+// set. It is never created in production builds or installed copies.
 export const DEMO_EMAIL = "demo@vilano.local";
 export const DEMO_PASSWORD = "changeme";
 
 export function ensureDemoUser(db) {
+  if (process.env.VILANO_DEV_DEMO !== "1") return;
   allowEmail(db, DEMO_EMAIL);
   if (!findUserByEmail(db, DEMO_EMAIL)) {
     createUser(db, DEMO_EMAIL, DEMO_PASSWORD);

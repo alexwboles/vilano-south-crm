@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { openDb, initSchema, bootstrapFreshDb } from "../db.js";
-import { createApp, pickUpdateAsset } from "../server.js";
+import { createApp, pickUpdateAsset, __resetLoginLimits } from "../server.js";
 
 const ADMIN_EMAIL = "admin@example.com";
 const ADMIN_PW = "s3cure-admin-pass";
@@ -29,10 +29,12 @@ function ok(name, cond, extra = "") {
 }
 
 let cookie = "";
-async function req(method, p, body, { auth = true, raw = false } = {}) {
+let csrfToken = "";
+async function req(method, p, body, { auth = true, raw = false, csrf = true } = {}) {
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
   if (auth && cookie) headers["Cookie"] = cookie;
+  if (csrf && csrfToken && !["GET", "HEAD"].includes(method)) headers["X-CSRF-Token"] = csrfToken;
   const r = await fetch(base + p, {
     method, headers, body: body === undefined ? undefined : JSON.stringify(body),
     redirect: "manual",
@@ -45,6 +47,7 @@ async function req(method, p, body, { auth = true, raw = false } = {}) {
   const text = await r.text();
   let json = null;
   try { json = JSON.parse(text); } catch { /* not json */ }
+  if (json && json.csrf) csrfToken = json.csrf;
   return { status: r.status, json, text, location: r.headers.get("location") };
 }
 
@@ -666,26 +669,43 @@ console.log("bugfix regressions: member delete block, dates, cycles, assignment 
   r = await req("GET", "/api/update-status");
   ok("update-status returns current version", typeof r.json?.current === "string" && r.json.current.length > 0, `got ${JSON.stringify(r.json)}`);
   ok("update-status not ready initially", r.json?.ready === false, `got ${r.json?.ready}`);
-  r = await req("POST", "/api/update-install");
+  r = await req("POST", "/api/admin/update-install");
   ok("update-install 400s with nothing downloaded", r.status === 400, `got ${r.status}`);
 }
 
 console.log("bugfix: self password change invalidates other sessions");
 {
-  const mainCookie = cookie;
+  // Concurrent sessions are allowed: a fresh login does NOT revoke prior
+  // sessions, so users can stay signed in on phone and computer at once.
+  const mainCookie = cookie, mainCsrf = csrfToken;
   let r = await req("POST", "/api/login", { email: ADMIN_EMAIL, password: ADMIN_PW }, { auth: false });
   ok("second login for session test", r.status === 200, `got ${r.status}`);
-  const secondCookie = cookie;
-  cookie = mainCookie;
-  r = await req("POST", "/api/admin/password", { password: "temp-new-pass-12" });
+  const sessCookie = cookie, sessCsrf = csrfToken;
+  cookie = mainCookie; csrfToken = mainCsrf;
+  r = await req("GET", "/api/me");
+  ok("prior session still valid after fresh login -> 200", r.status === 200, `got ${r.status}`);
+  cookie = sessCookie; csrfToken = sessCsrf;
+
+  // Password change keeps the current session but kills every other one.
+  // (Planted directly in the DB to simulate a second device.)
+  r = await req("POST", "/api/login", { email: ADMIN_EMAIL, password: ADMIN_PW }, { auth: false });
+  ok("login for password test", r.status === 200, `got ${r.status}`);
+  const meRow = db.prepare("SELECT id FROM users WHERE email = ?").get(ADMIN_EMAIL);
+  const { randomBytes: rb } = await import("node:crypto");
+  const otherToken = rb(32).toString("hex");
+  const exp = new Date(Date.now() + 3600e3).toISOString().slice(0, 19).replace("T", " ");
+  db.prepare("INSERT INTO sessions (token, user_id, expires_at, csrf) VALUES (?,?,?,?)")
+    .run(otherToken, meRow.id, exp, "other-csrf-token");
+  r = await req("POST", "/api/password", { password: "temp-new-pass-12" });
   ok("password change -> 200", r.status === 200, `got ${r.status}`);
-  cookie = secondCookie;
+  const savedCookie = cookie, savedCsrf = csrfToken;
+  cookie = `vs_session=${otherToken}`; csrfToken = "other-csrf-token";
   r = await req("GET", "/api/me");
   ok("other session invalidated -> 401", r.status === 401, `got ${r.status}`);
-  cookie = mainCookie;
+  cookie = savedCookie; csrfToken = savedCsrf;
   r = await req("GET", "/api/me");
   ok("current session survives -> 200", r.status === 200, `got ${r.status}`);
-  r = await req("POST", "/api/admin/password", { password: ADMIN_PW });
+  r = await req("POST", "/api/password", { password: ADMIN_PW });
   ok("password restored", r.status === 200, `got ${r.status}`);
 }
 
@@ -777,6 +797,7 @@ console.log("update asset picker (auto-update)");
 
 console.log("seeded dev path (SEED=1): demo user + fictional data");
 {
+  process.env.VILANO_DEV_DEMO = "1"; // explicit dev flag gates the demo account
   const dir2 = mkdtempSync(path.join(tmpdir(), "vilano-smoke-seed-"));
   const db2 = openDb(path.join(dir2, "test.db"));
   bootstrapFreshDb(db2, { seed: true });
@@ -939,6 +960,106 @@ console.log("redesign 2026-10-13: dashboard + members views");
   ok("projects -> 200 list (dashboard KPIs)", r.status === 200 && Array.isArray(r.json), `got ${r.status}`);
   r = await req("GET", "/api/events");
   ok("events -> 200 list (dashboard KPIs)", r.status === 200 && Array.isArray(r.json), `got ${r.status}`);
+}
+
+console.log("roles + admin gating + csrf + sessions + backup + import + audit");
+{
+  // Reset rate-limit state (the earlier rate-limit test tripped the IP bucket),
+  // then a fresh admin login.
+  __resetLoginLimits();
+  let r = await req("POST", "/api/login", { email: ADMIN_EMAIL, password: ADMIN_PW }, { auth: false });
+  ok("admin re-login for role tests -> 200", r.status === 200 && r.json?.ok, `got ${r.status}`);
+
+  // /api/me exposes role + csrf
+  r = await req("GET", "/api/me");
+  ok("/api/me returns role=admin + csrf token", r.status === 200 && r.json?.role === "admin" && typeof r.json?.csrf === "string" && r.json.csrf.length >= 16, JSON.stringify(r.json));
+
+  // CSRF: mutation without the token is rejected
+  r = await req("POST", "/api/members", { chamber: "house", first_name: "Csrf", last_name: "Probe", party: "R", state: "FL", district: 1 }, { csrf: false });
+  ok("POST without CSRF token -> 403", r.status === 403, `got ${r.status}`);
+  r = await req("POST", "/api/members", { chamber: "house", first_name: "Csrf", last_name: "Ok", party: "R", state: "FL", district: 1 });
+  ok("POST with CSRF token -> 201", r.status === 201, `got ${r.status} ${r.text.slice(0, 120)}`);
+
+  // Create a non-admin user
+  r = await req("POST", "/api/admin/allowed", { email: "regular@example.com" });
+  ok("admin allowlists regular@example.com -> 201", r.status === 201, `got ${r.status}`);
+  r = await req("POST", "/api/admin/users", { email: "regular@example.com", password: "regular-pass-123" });
+  ok("admin creates regular user -> 201", r.status === 201, `got ${r.status} ${r.text.slice(0, 120)}`);
+
+  const adminCookie = cookie, adminCsrf = csrfToken;
+  r = await req("POST", "/api/login", { email: "regular@example.com", password: "regular-pass-123" }, { auth: false });
+  ok("regular user login -> 200 role=user", r.status === 200 && r.json?.ok && r.json?.role === "user", `got ${r.status} ${JSON.stringify(r.json)}`);
+
+  // Non-admin is blocked from every admin route…
+  for (const [m, p, b] of [
+    ["GET", "/api/admin/users"], ["GET", "/api/admin/allowed"], ["GET", "/api/admin/backup"],
+    ["GET", "/api/admin/audit"], ["POST", "/api/admin/tunnel", { token: "", hostname: "" }],
+    ["POST", "/api/admin/update-install", {}], ["DELETE", "/api/admin/sample-legislators"],
+  ]) {
+    r = await req(m, p, b);
+    ok(`non-admin ${m} ${p} -> 403`, r.status === 403, `got ${r.status}`);
+  }
+  // …but can use the CRM and change their own password
+  r = await req("GET", "/api/members");
+  ok("non-admin GET /api/members -> 200", r.status === 200 && Array.isArray(r.json), `got ${r.status}`);
+  r = await req("POST", "/api/password", { password: "regular-new-pass-123" });
+  ok("non-admin POST /api/password -> 200", r.status === 200, `got ${r.status} ${r.text.slice(0, 100)}`);
+  r = await req("GET", "/api/sessions");
+  ok("GET /api/sessions lists own sessions with current flag",
+    r.status === 200 && Array.isArray(r.json) && r.json.length >= 1 && r.json.some(s => s.current === 1) && !("token" in (r.json[0] || {})),
+    `got ${r.status} ${JSON.stringify(r.json).slice(0, 160)}`);
+
+  // Restore the admin session (regular login didn't touch it)
+  cookie = adminCookie; csrfToken = adminCsrf;
+  r = await req("GET", "/api/me");
+  ok("admin session survives the regular-user login", r.status === 200 && r.json?.email === "admin@example.com", `got ${r.status}`);
+
+  // One-click backup: admin gets a real zip
+  r = await req("GET", "/api/admin/backup");
+  ok("admin GET /api/admin/backup -> 200 zip (PK magic)",
+    r.status === 200 && r.text.charCodeAt(0) === 0x50 && r.text.charCodeAt(1) === 0x4b && r.text.includes("vilano.db"),
+    `got ${r.status}, ${r.text.length} chars`);
+
+  // CSV import with per-row validation
+  r = await req("POST", "/api/members", { chamber: "house", first_name: "Import", last_name: "Target", party: "R", state: "FL", district: 5 });
+  const importName = "Import Target";
+  const csv = `member,date,type,summary,follow_up\n"${importName}",2026-10-01,Meeting,CSV import test row,Follow up soon\n"No Such Person",2026-10-02,Call,Bad member row,\n"${importName}",not-a-date,Email,Bad date row,\n`;
+  r = await req("POST", "/api/admin/import-interactions", { csv });
+  ok("CSV import validates per row", r.status === 200 && r.json?.imported === 1 && r.json?.errors?.length === 2 && r.json?.total === 3, JSON.stringify(r.json));
+
+  // Audit log records the activity above
+  r = await req("GET", "/api/admin/audit?limit=10");
+  ok("audit log has entries", r.status === 200 && Array.isArray(r.json) && r.json.length > 0 && r.json.every(a => typeof a.action === "string" && typeof a.created_at === "string"), `got ${r.status}`);
+
+  // Empty summary never flags duplicates
+  const mid = (await req("GET", "/api/members")).json.find(m => m.first_name === "Import").id;
+  r = await req("GET", `/api/interactions/possible-duplicates?member_id=${mid}&date=2026-10-01&summary=`);
+  ok("possible-duplicates with empty summary -> []", r.status === 200 && Array.isArray(r.json) && r.json.length === 0, JSON.stringify(r.json));
+
+  // Sentence counter: initials/abbreviations don't inflate the count
+  r = await req("POST", "/api/projects/groups", { name: "Sentence Test Group" });
+  const gid = r.json?.id;
+  r = await req("POST", `/api/projects/groups/${gid}/tasks`, { title: "t", note: "Called T. Boles. He agreed." });
+  ok("2-sentence note with initialism accepted", r.status === 201, `got ${r.status} ${r.text.slice(0, 120)}`);
+  r = await req("POST", `/api/projects/groups/${gid}/tasks`, { title: "t", note: "Met Rep. Smith today. Good talk." });
+  ok("2-sentence note with abbreviation accepted", r.status === 201, `got ${r.status} ${r.text.slice(0, 120)}`);
+  r = await req("POST", `/api/projects/groups/${gid}/tasks`, { title: "t2", note: "One. Two. Three." });
+  ok("3-sentence note still rejected", r.status === 400, `got ${r.status}`);
+
+  // Per-account rate limiting (IP bucket was reset by the successful logins above)
+  const rlStatuses = [];
+  for (let i = 0; i < 12; i++) {
+    r = await req("POST", "/api/login", { email: "acctlimit-victim@example.com", password: "wrong" }, { auth: false });
+    rlStatuses.push(r.status);
+  }
+  ok("per-account rate limit trips -> 429", rlStatuses[11] === 429 && rlStatuses.filter(s => s === 401).length >= 8, JSON.stringify(rlStatuses));
+
+  // Follow-up navigation targets the real rendered rows (static check)
+  const { fileURLToPath: f2p } = await import("node:url");
+  const appjs2 = readFileSync(f2p(new URL("../public/app.js", import.meta.url)), "utf8");
+  ok("openInteractionById queries #ix-rows .ix-row", /#ix-rows \.ix-row\[data-id=/.test(appjs2), "selector not updated");
+  ok("stale #ix-table selector is gone", !/#ix-table tbody tr\.row\[data-id=/.test(appjs2), "stale selector still present");
+  ok("detail IDs are unique per row", /id="ix-d-status-\$\{r\.id\}"/.test(appjs2), "ix-d-status not unique");
 }
 
 console.log("logout");

@@ -86,26 +86,32 @@
 })();
 // Pick the single best URL: public link first (works everywhere),
 // then secure/private, then same-Wi-Fi as a last resort.
-fetch("/api/phone-url", { credentials: "same-origin" })
-  .then(r => r.json())
-  .then(d => {
+// Refreshes every 15s so a dead or restarted tunnel is visible here.
+function renderPhone(d) {
     const candidates = [
       { url: d.publicUrl, label: "Public link", qr: "/api/phone-qr-public.png", note: "Works from anywhere." },
       { url: d.secureUrl, label: "Secure link", qr: "/api/phone-qr-secure.png", note: "Needs Tailscale on this PC." },
       { url: d.remoteUrl, label: "Private network", qr: "/api/phone-qr-remote.png", note: "Needs Tailscale or NetBird on both." },
       { url: d.url, label: "Same Wi-Fi", qr: "/api/phone-qr.png", note: "Phone must be on this Wi-Fi." },
     ].filter(c => c.url);
+    const img = document.getElementById("qr-main");
     if (!candidates.length) {
       document.getElementById("qr-url").textContent = "No connection available — make sure the CRM is running.";
-      document.getElementById("qr-hero").querySelector("img").style.display = "none";
+      img.style.display = "none";
+      document.getElementById("connect-sub").textContent = "Waiting for a connection…";
       return;
     }
     const best = candidates[0];
-    document.getElementById("qr-main").src = best.qr;
-    document.getElementById("qr-url").textContent = best.url;
+    const freshQr = best.qr + (best.qr.includes("?") ? "&" : "?") + "t=" + Date.now();
+    if (img.getAttribute("src") !== best.qr) img.src = best.qr;
+    img.style.display = "";
+    // Bust the QR cache when the URL changes (e.g. tunnel restarted).
+    const urlEl = document.getElementById("qr-url");
+    if (urlEl.textContent !== best.url) { urlEl.textContent = best.url; img.src = freshQr; }
     document.getElementById("connect-sub").textContent =
       `Scan the code with your phone's camera. (${best.label} — ${best.note})`;
     const alt = document.getElementById("alt-list");
+    alt.innerHTML = "";
     candidates.slice(1).forEach(c => {
       const div = document.createElement("div");
       div.className = "alt-row";
@@ -114,8 +120,15 @@ fetch("/api/phone-url", { credentials: "same-origin" })
       alt.appendChild(div);
     });
     if (!candidates.slice(1).length) alt.innerHTML = "<p>No other connection methods available.</p>";
-  })
-  .catch(() => { document.getElementById("qr-url").textContent = "Could not determine the address."; });
+}
+function refreshPhone() {
+  fetch("/api/phone-url", { credentials: "same-origin" })
+    .then(r => r.json())
+    .then(renderPhone)
+    .catch(() => { document.getElementById("qr-url").textContent = "Could not determine the address."; });
+}
+refreshPhone();
+setInterval(refreshPhone, 15000);
 </script>
 </body>
 </html>

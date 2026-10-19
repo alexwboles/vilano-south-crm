@@ -9,15 +9,104 @@ function esc(s) {
   }[c]));
 }
 
+let csrfToken = null;
+let userRole = "user";
+
 async function api(path, opts = {}) {
-  const r = await fetch(path, {
-    ...opts,
-    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
-  });
+  const method = (opts.method || "GET").toUpperCase();
+  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  if (csrfToken && method !== "GET" && method !== "HEAD") headers["X-CSRF-Token"] = csrfToken;
+  let r;
+  try {
+    r = await fetch(path, { ...opts, headers });
+  } catch (e) {
+    // Network failure on a mutation: queue it for background sync instead of
+    // losing it. Reads just fail — the service worker serves cached data.
+    if (method !== "GET" && method !== "HEAD" && queueableMutation(path, opts.body)) {
+      await queueMutation(path, method, opts.body);
+      throw new Error("Offline — change queued. It will sync when you're back online.");
+    }
+    throw e;
+  }
   if (r.status === 401) { location.href = "/login.html"; throw new Error("signed out"); }
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
   return data;
+}
+
+// Mutations safe to queue offline: data writes only. Auth, file uploads,
+// backups, imports, and installs are never queued.
+function queueableMutation(path, body) {
+  if (!path.startsWith("/api/")) return false;
+  if (["/api/login", "/api/setup", "/api/logout", "/api/password", "/api/documents",
+       "/api/admin/backup", "/api/admin/import-interactions", "/api/admin/update-install",
+       "/api/update-install"].includes(path)) return false;
+  return true;
+}
+
+// ---- offline outbox: failed mutations wait in IndexedDB, the service
+// worker replays them via Background Sync when connectivity returns ----
+const OUTBOX_DB = "grcrm-outbox";
+function idb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(OUTBOX_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("queue", { autoIncrement: true });
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function outboxCount() {
+  try {
+    const db = await idb();
+    return await new Promise((resolve, reject) => {
+      const tx = db.transaction("queue", "readonly");
+      const q = tx.objectStore("queue").count();
+      q.onsuccess = () => resolve(q.result);
+      q.onerror = () => reject(q.error);
+    });
+  } catch { return 0; }
+}
+async function queueMutation(path, method, body) {
+  try {
+    const db = await idb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction("queue", "readwrite");
+      tx.objectStore("queue").add({
+        path, method, body: typeof body === "string" ? body : null,
+        csrf: csrfToken, ts: Date.now(),
+      });
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+    if ("serviceWorker" in navigator) {
+      const reg = await navigator.serviceWorker.ready.catch(() => null);
+      if (reg && "sync" in reg) { try { await reg.sync.register("grcrm-outbox"); } catch {} }
+    }
+  } catch { /* queueing failed — the error below still informs the user */ }
+  updateOfflineIndicator();
+}
+async function updateOfflineIndicator() {
+  const bar = $("#offline-banner");
+  if (!bar) return;
+  const n = await outboxCount();
+  const offline = !navigator.onLine;
+  if (n > 0) {
+    bar.hidden = false;
+    $("#offline-text").textContent = offline
+      ? `Offline — ${n} change${n === 1 ? "" : "s"} queued. They'll sync when you're back online.`
+      : `Syncing ${n} queued change${n === 1 ? "" : "s"}…`;
+  } else if (offline) {
+    bar.hidden = false;
+    $("#offline-text").textContent = "You're offline — showing cached data. Changes will queue.";
+  } else {
+    bar.hidden = true;
+  }
+}
+window.addEventListener("online", updateOfflineIndicator);
+window.addEventListener("offline", updateOfflineIndicator);
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.addEventListener("message", (e) => {
+    if (e.data && e.data.type === "outbox") updateOfflineIndicator();
+  });
 }
 
 function toast(msg) {
@@ -158,8 +247,11 @@ function viaLine(r) {
   const t = r.staff_title ? `, ${r.staff_title}` : "";
   return `<div class="via">via ${esc(r.staff_first_name)} ${esc(r.staff_last_name)}${esc(t)}</div>`;
 }
+function localISO(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 function todayISO() {
-  return new Date().toISOString().slice(0, 10);
+  return localISO(new Date());
 }
 
 // Branded empty state: serif headline + one line of guidance + optional CTA button.
@@ -416,21 +508,21 @@ function toggleInteractionDetail(el, r, m) {
     <div><div class="lbl">Committees</div><div class="val">${m && m.committees.length ? m.committees.map(committeeChip).join("") : "—"}</div></div>
     <div class="full"><div class="lbl">Staff</div><div class="val">${memberStaffHTML(m)}</div></div>
     ${r.parent_id ? `<div class="full"><div class="lbl">Follow-up to</div><div class="val"><button class="linklike" data-act="goparent">${esc(fmtDate(r.parent_date))} — ${esc(r.parent_label || "")}</button></div></div>` : ""}
-    <div class="full"><div class="lbl">Follow-ups</div><div class="val" id="ix-children"><span style="color:var(--ink-faint)">Loading…</span></div></div>
+    <div class="full"><div class="lbl">Follow-ups</div><div class="val" id="ix-children-${r.id}"><span style="color:var(--ink-faint)">Loading…</span></div></div>
     <div class="full"><div class="lbl">Next step</div><div class="val">${esc(r.next_step || "—")}</div></div>
     <div><div class="lbl">Type</div><div class="val">${esc(r.interaction_type || "—")}</div></div>
-    <div><div class="lbl">Status</div><div class="val"><select class="status-sel ${esc(r.status)}" id="ix-d-status" aria-label="Status">
+    <div><div class="lbl">Status</div><div class="val"><select class="status-sel ${esc(r.status)}" id="ix-d-status-${r.id}" aria-label="Status">
       ${Object.entries(STATUS_LABEL).map(([k, l]) => `<option value="${k}" ${r.status === k ? "selected" : ""}>${l}</option>`).join("")}
     </select></div></div>
     <div><div class="lbl">Date</div><div class="val">${esc(fmtDate(r.date))}</div></div>
-    <div class="full" id="ix-outcomes" style="${r.status === "done" ? "" : "display:none"}">
+    <div class="full" id="ix-outcomes-${r.id}" style="${r.status === "done" ? "" : "display:none"}">
       <div class="lbl">Outcomes</div>
       <div class="val">
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
           <button class="btn small" data-act="oc-task">New task</button>
           <button class="btn small" data-act="oc-event">New event</button>
         </div>
-        <div id="oc-form"></div>
+        <div id="oc-form-${r.id}"></div>
       </div>
     </div>
     <div class="detail-actions">
@@ -443,7 +535,7 @@ function toggleInteractionDetail(el, r, m) {
 
   // Follow-ups list (lazy).
   api("/api/interactions/" + r.id + "/followups").then(kids => {
-    const box = d.querySelector("#ix-children");
+    const box = d.querySelector(`#ix-children-${r.id}`);
     if (!box || !box.isConnected) return;
     box.innerHTML = kids.length ? kids.map(k =>
       `<div class="assign-row"><span style="white-space:nowrap">${esc(fmtDate(k.date))}</span>
@@ -452,7 +544,7 @@ function toggleInteractionDetail(el, r, m) {
       : '<span style="color:var(--ink-faint)">None yet.</span>';
     box.querySelectorAll("[data-openfu]").forEach(b => b.onclick = () => openInteractionById(b.dataset.openfu));
   }).catch(() => {
-    const box = d.querySelector("#ix-children");
+    const box = d.querySelector(`#ix-children-${r.id}`);
     if (box && box.isConnected) box.innerHTML = '<span style="color:var(--ink-faint)">None yet.</span>';
   });
 
@@ -479,14 +571,14 @@ function toggleInteractionDetail(el, r, m) {
   };
 
   // Inline status: setting Done reveals the outcome shortcuts.
-  d.querySelector("#ix-d-status").onchange = async (e) => {
+  d.querySelector(`#ix-d-status-${r.id}`).onchange = async (e) => {
     const v = e.target.value;
     try {
       await api(`/api/interactions/${r.id}/status`, { method: "POST", body: JSON.stringify({ status: v }) });
       r.status = v;
       e.target.className = "status-sel " + v;
       el.querySelector(".ix-r3 .pill").outerHTML = statusPill(v);
-      d.querySelector("#ix-outcomes").style.display = v === "done" ? "" : "none";
+      d.querySelector(`#ix-outcomes-${r.id}`).style.display = v === "done" ? "" : "none";
       toast("Status updated.");
     } catch (err) { toast("Error: " + err.message); e.target.value = r.status; }
   };
@@ -497,11 +589,11 @@ function toggleInteractionDetail(el, r, m) {
 
 // Scroll to an interaction row and expand it (used by follow-up links).
 function openInteractionById(id) {
-  const row = document.querySelector(`#ix-table tbody tr.row[data-id="${id}"]`);
+  const row = document.querySelector(`#ix-rows .ix-row[data-id="${id}"]`);
   if (row) {
     row.scrollIntoView({ block: "center" });
-    const next = row.nextSibling;
-    if (!(next && next.classList && next.classList.contains("detail"))) row.click();
+    const d = row.querySelector(".ix-detail");
+    if (d && d.style.display === "none") row.click();
   } else {
     toast("That interaction isn't in the current view.");
   }
@@ -510,11 +602,11 @@ function openInteractionById(id) {
 function plusDaysISO(n) {
   const t = new Date();
   t.setDate(t.getDate() + n);
-  return t.toISOString().slice(0, 10);
+  return localISO(t);
 }
 
 async function renderOutcomeTaskForm(d, r) {
-  const box = d.querySelector("#oc-form");
+  const box = d.querySelector(`#oc-form-${r.id}`);
   let groups = [];
   try { groups = await api("/api/projects"); } catch (e) { toast("Error: " + e.message); return; }
   if (!groups.length) { toast("Create a project group first."); return; }
@@ -544,7 +636,7 @@ async function renderOutcomeTaskForm(d, r) {
 }
 
 function renderOutcomeEventForm(d, r) {
-  const box = d.querySelector("#oc-form");
+  const box = d.querySelector(`#oc-form-${r.id}`);
   box.innerHTML = `
     <div class="oc-form">
       <div class="field"><label>Description</label><input type="text" id="oc-desc"
@@ -814,7 +906,7 @@ function openInteractionPanel(existing, prefill) {
               ).join("") + `</ul><p>Log this one anyway?</p>`,
               `<button class="btn" id="dup-back">Go back</button><button class="btn primary" id="dup-save">Log anyway</button>`);
             $("#dup-back").onclick = closeModal;
-            $("#dup-save").onclick = async () => { closeModal(); await saveNow(); };
+            $("#dup-save").onclick = guard($("#dup-save"), async () => { closeModal(); await saveNow(); });
             return;
           }
         } catch { /* duplicate check failed — save anyway */ }
@@ -836,18 +928,23 @@ async function renderEvents() {
   v.innerHTML = `
     <div class="view-head">
       <div><h2>Events</h2><p class="hint">Upcoming events — simple list.</p></div>
-      <button class="btn primary" id="ev-add">Add event</button>
+      <div style="display:flex;gap:12px;align-items:center">
+        <label class="pager-toggle" title="Include past events"><input type="checkbox" id="ev-past"> Show past events</label>
+        <button class="btn primary" id="ev-add">Add event</button>
+      </div>
     </div>
     <div class="card"><div class="table-wrap"><table class="grid">
       <thead><tr><th>Date</th><th>Description</th><th>Lead person</th><th style="width:130px"></th></tr></thead>
       <tbody id="ev-body"></tbody>
     </table></div></div>`;
   $("#ev-add").onclick = () => openEventModal(null);
-  await loadEvents();
+  $("#ev-past").onchange = (e) => loadEvents(e.target.checked);
+  await loadEvents(false);
 }
 
-async function loadEvents() {
-  const rows = await api("/api/events");
+async function loadEvents(showPast) {
+  if (showPast === undefined) showPast = !!$("#ev-past")?.checked;
+  const rows = await api(showPast ? "/api/events" : "/api/events?upcoming=1");
   const tb = $("#ev-body");
   if (!rows.length) {
     tb.innerHTML = `<tr><td colspan="4">${emptyState("No events on the calendar.", "Add fundraisers, meetings, and deadlines as they come up.", "Add event", "add")}</td></tr>`;
@@ -871,12 +968,12 @@ async function loadEvents() {
 }
 
 function openEventModal(existing) {
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayISO();
   openModal(existing ? "Edit event" : "Add event", `
     <div class="form-err" id="form-err"></div>
     <div class="field"><label>Date</label><input type="date" id="e-date" value="${esc(existing?.date || today)}"></div>
     <div class="field"><label>Description</label><input type="text" id="e-desc" value="${esc(existing?.description || "")}" placeholder="e.g. Fundraiser, Rep. Smith"></div>
-    <div class="field"><label>Lead person</label><input type="text" id="e-lead" value="${esc(existing?.lead_person || "")}" placeholder="e.g. T. Boles"></div>
+    <div class="field"><label>Lead person <span style="color:var(--red-ink)">*</span></label><input type="text" id="e-lead" required value="${esc(existing?.lead_person || "")}" placeholder="e.g. T. Boles"></div>
   `, `<button class="btn" id="e-cancel">Cancel</button><button class="btn primary" id="e-save">${existing ? "Save changes" : "Add event"}</button>`);
   $("#e-cancel").onclick = closeModal;
   $("#e-save").onclick = guard($("#e-save"), async () => {
@@ -1064,10 +1161,25 @@ function openTaskModal(groupId, existing) {
 // SETTINGS
 // =====================================================================
 async function renderSettings() {
+  const me = await api("/api/me").catch(() => null);
+  userRole = me?.role || "user";
+  const isAdmin = userRole === "admin";
   const v = $("#view");
   v.innerHTML = `
-    <div class="view-head"><div><h2>Settings</h2><p class="hint">Access control for this workspace. <span id="app-version" class="muted"></span></p></div></div>
+    <div class="view-head"><div><h2>Settings</h2><p class="hint">${isAdmin ? "Access control for this workspace." : "Your account."} <span id="app-version" class="muted"></span></p></div></div>
     <div class="settings-grid">
+      <div class="card"><div class="pad">
+        <h3>Change my password</h3>
+        <p class="desc">Update the password for the account you're signed in with.</p>
+        <div class="field"><input type="password" id="pw-new" placeholder="New password (8+ characters)"></div>
+        <button class="btn" id="pw-save">Update password</button>
+      </div></div>
+      <div class="card"><div class="pad">
+        <h3>Signed-in sessions</h3>
+        <p class="desc">Devices signed in as you. Revoking signs that device out.</p>
+        <ul class="list-plain" id="session-list"><li><span style="color:var(--ink-faint)">Loading…</span></li></ul>
+      </div></div>
+      ${isAdmin ? `
       <div class="card"><div class="pad">
         <h3>Approved emails</h3>
         <p class="desc">Only these email addresses can have an account. No self-registration.</p>
@@ -1089,16 +1201,22 @@ async function renderSettings() {
         <div class="form-err" id="form-err" style="margin-top:10px"></div>
       </div></div>
       <div class="card"><div class="pad">
-        <h3>Change my password</h3>
-        <p class="desc">Update the password for the account you're signed in with.</p>
-        <div class="field"><input type="password" id="pw-new" placeholder="New password (8+ characters)"></div>
-        <button class="btn" id="pw-save">Update password</button>
-      </div></div>
-      <div class="card"><div class="pad">
         <h3>Members of Congress</h3>
         <p class="desc">Fix details or remove members. Removal is blocked while interactions or staff history reference a member.</p>
         <div style="margin-bottom:10px"><button class="btn" id="member-csv-btn">Export roster CSV</button></div>
         <ul class="list-plain" id="member-list"></ul>
+      </div></div>
+      <div class="card"><div class="pad">
+        <h3>Backup</h3>
+        <p class="desc">Download a timestamped zip of the database plus all uploaded files.</p>
+        <button class="btn primary" id="backup-btn">Download backup</button>
+      </div></div>
+      <div class="card"><div class="pad">
+        <h3>Import interactions</h3>
+        <p class="desc">Upload a CSV with columns <code>member,date,type,summary,follow_up</code>. Member matches "First Last". Max ~200 KB per import.</p>
+        <div class="field"><input type="file" id="import-file" accept=".csv,text/csv"></div>
+        <button class="btn primary" id="import-btn">Import CSV</button>
+        <div id="import-report" style="margin-top:10px"></div>
       </div></div>
       <div class="card"><div class="pad">
         <h3>Sample data</h3>
@@ -1122,8 +1240,31 @@ async function renderSettings() {
           <button class="btn" id="tunnel-clear">Disconnect</button>
         </div>
       </div></div>
+      <div class="card"><div class="pad">
+        <h3>Activity log</h3>
+        <p class="desc">Who created, changed, or deleted what — newest first.</p>
+        <div style="margin-bottom:10px"><button class="btn" id="audit-refresh">Refresh</button></div>
+        <div class="table-wrap"><table class="grid">
+          <thead><tr><th>When</th><th>Who</th><th>Action</th><th>Detail</th></tr></thead>
+          <tbody id="audit-body"><tr><td colspan="4">Loading…</td></tr></tbody>
+        </table></div>
+      </div></div>
+      ` : ""}
     </div>`;
-  await loadSettings();
+  // --- everyone: password + sessions ---
+  $("#pw-save").onclick = guard($("#pw-save"), async () => {
+    fieldErr(null);
+    try {
+      await api("/api/password", { method: "POST", body: JSON.stringify({ password: $("#pw-new").value }) });
+      $("#pw-new").value = ""; toast("Password updated. Other sessions were signed out.");
+    } catch (e) { fieldErr(e.message); }
+  });
+  await loadSessions();
+  if (!isAdmin) {
+    api("/api/update-status").then(u => { $("#app-version").textContent = `v${u.current}`; }).catch(() => {});
+    return;
+  }
+  // --- admin only below ---
   $("#allow-add").onclick = guard($("#allow-add"), async () => {
     fieldErr(null);
     try {
@@ -1138,13 +1279,26 @@ async function renderSettings() {
       $("#u-email").value = ""; $("#u-pass").value = ""; toast("User created."); loadSettings();
     } catch (e) { fieldErr(e.message); }
   });
-  $("#pw-save").onclick = guard($("#pw-save"), async () => {
-    fieldErr(null);
+  $("#backup-btn").onclick = () => { window.location.href = "/api/admin/backup"; };
+  $("#import-btn").onclick = guard($("#import-btn"), async () => {
+    const f = $("#import-file").files[0];
+    const box = $("#import-report");
+    if (!f) { box.innerHTML = `<p class="desc">Choose a CSV file first.</p>`; return; }
+    const text = await f.text();
+    box.innerHTML = `<p class="desc">Importing…</p>`;
     try {
-      await api("/api/admin/password", { method: "POST", body: JSON.stringify({ password: $("#pw-new").value }) });
-      $("#pw-new").value = ""; toast("Password updated. Other sessions were signed out.");
-    } catch (e) { fieldErr(e.message); }
+      const r = await api("/api/admin/import-interactions", { method: "POST", body: JSON.stringify({ csv: text }) });
+      box.innerHTML = `<p><strong>Imported ${r.imported} of ${r.total} rows.</strong></p>` +
+        (r.errors.length ? `<ul class="list-plain">` + r.errors.slice(0, 20).map(e =>
+          `<li><span>Row ${e.row}</span><span style="color:var(--red-ink)">${esc(e.error)}</span></li>`).join("") +
+          (r.errors.length > 20 ? `<li><span>…and ${r.errors.length - 20} more</span></li>` : "") + `</ul>`
+          : `<p class="desc">No errors.</p>`);
+      toast(`Imported ${r.imported} interactions.`);
+    } catch (e) { box.innerHTML = `<p style="color:var(--red-ink)">${esc(e.message)}</p>`; }
   });
+  $("#audit-refresh").onclick = () => loadAudit();
+  await loadSettings();
+  await loadAudit();
   // sample legislator roster: load / purge
   async function refreshSampleStatus() {
     try {
@@ -1152,8 +1306,6 @@ async function renderSettings() {
       $("#sample-status").textContent = s.count > 0
         ? `${s.count} sample legislators loaded.`
         : "No sample data loaded.";
-      // Only disable Load when the whole sample set is present; after a
-      // partial load the button stays enabled so a retry completes the rest.
       $("#sample-load").disabled = s.full === true;
       $("#sample-purge").disabled = s.count === 0;
     } catch { $("#sample-status").textContent = "Could not check sample data status."; }
@@ -1211,6 +1363,36 @@ async function renderSettings() {
   api("/api/update-status").then(u => {
     $("#app-version").textContent = `v${u.current}`;
   }).catch(() => {});
+}
+
+async function loadSessions() {
+  const box = $("#session-list");
+  try {
+    const rows = await api("/api/sessions");
+    box.innerHTML = rows.length ? rows.map(s => {
+      const ua = s.user_agent || "Unknown device";
+      const when = s.created_at ? s.created_at.slice(0, 16).replace("T", " ") : "";
+      return `<li><span>${esc(ua)}${s.current ? ' <span class="cap" style="color:var(--ink-faint)">(this device)</span>' : ""}<br><span style="color:var(--ink-faint);font-size:12px">${esc(when)}${s.ip ? ` · ${esc(s.ip)}` : ""}</span></span>
+        ${s.current ? "" : `<button class="linklike" data-revoke="${s.id}" style="color:var(--red-ink)">Revoke</button>`}</li>`;
+    }).join("") : `<li><span style="color:var(--ink-faint)">No sessions.</span></li>`;
+    box.querySelectorAll("[data-revoke]").forEach(b => b.onclick = guard(b, async () => {
+      try { await api("/api/sessions/" + b.dataset.revoke, { method: "DELETE" }); toast("Session revoked."); loadSessions(); }
+      catch (e) { toast("Error: " + e.message); }
+    }));
+  } catch { box.innerHTML = `<li><span style="color:var(--ink-faint)">Could not load sessions.</span></li>`; }
+}
+
+async function loadAudit() {
+  const tb = $("#audit-body");
+  if (!tb) return;
+  try {
+    const rows = await api("/api/admin/audit?limit=100");
+    tb.innerHTML = rows.length ? rows.map(a =>
+      `<tr><td style="white-space:nowrap">${esc((a.created_at || "").slice(0, 16).replace("T", " "))}</td>` +
+      `<td>${esc(a.email || "—")}</td><td>${esc(a.action)}${a.entity ? ` ${esc(a.entity)}` : ""}</td>` +
+      `<td class="trunc">${esc(a.detail || "")}</td></tr>`).join("")
+      : `<tr><td colspan="4">No activity yet.</td></tr>`;
+  } catch { tb.innerHTML = `<tr><td colspan="4">Could not load the activity log.</td></tr>`; }
 }
 
 async function loadSettings() {
@@ -1711,6 +1893,8 @@ const views = { dashboard: renderDashboard, interactions: renderInteractions, me
 window.addEventListener("hashchange", () => {
   const h = (location.hash || "").replace(/^#/, "");
   if (!h || h === state.view) return;
+  if (h === "phone") { location.href = "/phone"; return; }
+  if (h === "onepager") { location.href = "/one-pager"; return; }
   if (views[h] || h.startsWith("committee/")) go(h);
 });
 
@@ -1804,7 +1988,7 @@ $("#update-dismiss-btn").onclick = () => { updateDismissed = true; $("#update-ba
 $("#update-install-btn").onclick = async () => {
   if (!confirm("Install the update now? The CRM will close and reopen on the new version.")) return;
   try {
-    await api("/api/update-install", { method: "POST" });
+    await api("/api/admin/update-install", { method: "POST" });
     $("#update-banner-text").textContent = "Installing… the CRM will reopen shortly.";
     $("#update-install-btn").disabled = true;
   } catch (e) { toast("Could not start the update: " + e.message); }
@@ -1818,6 +2002,9 @@ $("#update-install-btn").onclick = async () => {
     }
     const me = await api("/api/me");
     $("#who").textContent = me.email;
+    csrfToken = me.csrf || null;
+    userRole = me.role || "user";
+    updateOfflineIndicator();
     const h = (location.hash || "").replace(/^#/, "");
     go(h || "dashboard");
     checkForUpdate();
@@ -1830,7 +2017,7 @@ $("#update-install-btn").onclick = async () => {
 // =====================================================================
 function isoDaysAgo(n) {
   const t = new Date(); t.setDate(t.getDate() - n);
-  return t.toISOString().slice(0, 10);
+  return localISO(t);
 }
 
 // Jump to the interaction log filtered to one member (by last name).
@@ -1987,17 +2174,25 @@ function wireSmartSearch() {
       const rows = await api("/api/interactions?" + new URLSearchParams({ q }));
       ixs = rows.slice(0, 5);
     } catch { /* results still show members */ }
-    if (!mems.length && !ixs.length) {
-      res.innerHTML = `<div class="ss-empty">No members or interactions match "${esc(q)}".</div>`;
+    let staff = [];
+    try {
+      const rows = await api("/api/staff?" + new URLSearchParams({ q }));
+      staff = rows.slice(0, 5);
+    } catch { /* results still show members + interactions */ }
+    if (!mems.length && !ixs.length && !staff.length) {
+      res.innerHTML = `<div class="ss-empty">No members, staff, or interactions match "${esc(q)}".</div>`;
     } else {
       res.innerHTML =
         (mems.length ? `<div class="ss-sec">Members</div>` + mems.map(m =>
           `<div class="ss-item" role="option" data-mem="${m.id}"><span class="party-dot ${esc(m.party || "I")}">${esc((m.party || "I")[0])}</span><span class="member-name">${esc(m.first_name)} ${esc(m.last_name)}</span>${chamberBadge(m.chamber)}<span class="ss-meta">${esc(m.state)}${m.district ? `-${m.district}` : ""}</span></div>`).join("") : "") +
+        (staff.length ? `<div class="ss-sec">Staff</div>` + staff.map(s =>
+          `<div class="ss-item" role="option" data-staff="${s.id}"><span class="member-name">${esc(s.first_name)} ${esc(s.last_name)}</span><span class="ss-meta">${esc(s.title || "")}</span></div>`).join("") : "") +
         (ixs.length ? `<div class="ss-sec">Interactions</div>` + ixs.map(r =>
           `<div class="ss-item" role="option" data-ixq="${esc(r.last_name)}"><span class="stat-mini">${esc(fmtDate(r.date))}</span><span class="trunc">${esc(r.summary)}</span><span class="ss-meta">${esc(memberLabel(r))}</span></div>`).join("") : "");
     }
     wrap.classList.add("open");
     res.querySelectorAll("[data-mem]").forEach(el => el.onclick = () => { close(); openMemberFromSearch(Number(el.dataset.mem)); });
+    res.querySelectorAll("[data-staff]").forEach(el => el.onclick = () => { close(); input.value = ""; go("staff"); setTimeout(() => { const f = $("#sf-q"); if (f) { f.value = el.querySelector(".member-name").textContent; f.dispatchEvent(new Event("input")); } }, 250); });
     res.querySelectorAll("[data-ixq]").forEach(el => el.onclick = () => { close(); input.value = ""; filterLogToMember(el.dataset.ixq); });
   };
   input.addEventListener("input", () => { clearTimeout(t); t = setTimeout(run, 220); });

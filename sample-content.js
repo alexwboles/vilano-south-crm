@@ -172,6 +172,10 @@ export function purgeSampleContent(db, uploadsDir) {
   for (const t of ["documents", "events", "project_groups", "tasks", "staff"]) {
     counts[t] = Number(db.prepare(`DELETE FROM ${t} WHERE is_sample = 1`).run().changes);
   }
-  // interactions + member_committees + staff_assignments cascade from members/staff deletes
+  // interactions + member_committees + staff_assignments cascade from members/staff deletes;
+  // count sample interactions explicitly so the purge total is honest.
+  counts.interactions = Number(
+    db.prepare("DELETE FROM interactions WHERE is_sample = 1").run().changes
+  );
   return counts;
 }
