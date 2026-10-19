@@ -299,6 +299,11 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
       if (want && want[0].toLowerCase() === got.toLowerCase()) {
         updateState.ready = true;
         console.log(`Update ${tag} downloaded and checksum-verified — ready to install.`);
+        // Auto-install on launch: don't wait for a banner click.
+        if (AUTO_UPDATE) {
+          console.log(`Auto-installing update ${tag} in 10 seconds...`);
+          setTimeout(() => runUpdateInstall(null), 10000);
+        }
       } else {
         updateState.error = "Update refused: checksum mismatch.";
         updateState.file = null;
@@ -479,12 +484,12 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     next();
   };
 
-  app.post("/api/admin/update-install", requireAdmin, (req, res) => {
-    if (!updateState.ready || !updateState.file || !fs.existsSync(updateState.file)) {
-      return res.status(400).json({ error: "No update downloaded yet." });
-    }
-    audit(db, req.user, "update-install", "app", updateState.latest, `Installed update ${updateState.latest}`);
-    res.json({ ok: true });
+  // Auto-install: when a verified update is ready, install it automatically
+  // without waiting for a banner click. Disable with VILANO_NO_AUTO_UPDATE=1.
+  const AUTO_UPDATE = process.env.VILANO_NO_AUTO_UPDATE !== "1";
+  const runUpdateInstall = (byUser) => {
+    if (!updateState.ready || !updateState.file || !fs.existsSync(updateState.file)) return false;
+    console.log(`Installing update ${updateState.latest}${byUser ? " (manual)" : " (auto)"}...`);
     // Launch the installer, then get out of its way. It closes the tray/server itself.
     setTimeout(() => {
       try {
@@ -492,6 +497,15 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
       } catch {}
       setTimeout(() => process.exit(0), 1500);
     }, 500);
+    return true;
+  };
+
+  app.post("/api/admin/update-install", requireAdmin, (req, res) => {
+    if (!runUpdateInstall(req.user)) {
+      return res.status(400).json({ error: "No update downloaded yet." });
+    }
+    audit(db, req.user, "update-install", "app", updateState.latest, `Installed update ${updateState.latest}`);
+    res.json({ ok: true });
   });
 
   app.get("/api/update-status", requireAuth, (req, res) => res.json({
@@ -988,7 +1002,7 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
       ORDER BY i.date ASC LIMIT 25
     `).all().map((r) => ({ ...r, member_label: memberFullLabel(r) }));
     const overdue = db.prepare(`
-      SELECT t.id, t.title, t.owner, t.due_date, t.status, t.note, g.name AS group_name
+      SELECT t.id, t.title, t.owner, t.due_date, t.status, t.note, t.group_id, g.name AS group_name
       FROM tasks t JOIN project_groups g ON g.id = t.group_id
       WHERE t.status <> 'done' AND t.due_date IS NOT NULL AND t.due_date < date('now')
       ORDER BY t.due_date ASC LIMIT 25
@@ -1113,6 +1127,18 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     res.status(201).json({ id: ixId });
   });
 
+  app.get("/api/interactions/:id", (req, res) => {
+    const r = db.prepare("SELECT * FROM interactions WHERE id = ?").get(req.params.id);
+    if (!r) return res.status(404).json({ error: "not-found" });
+    res.json(r);
+  });
+
+  app.get("/api/tasks/:id", (req, res) => {
+    const r = db.prepare("SELECT * FROM tasks WHERE id = ?").get(req.params.id);
+    if (!r) return res.status(404).json({ error: "not-found" });
+    res.json(r);
+  });
+
   app.put("/api/interactions/:id", (req, res) => {
     const cur = db.prepare("SELECT id FROM interactions WHERE id = ?").get(req.params.id);
     if (!cur) return res.status(404).json({ error: "not-found" });
@@ -1151,6 +1177,12 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
     } else {
       res.json(db.prepare("SELECT * FROM events ORDER BY date ASC, id ASC").all());
     }
+  });
+
+  app.get("/api/events/:id", (req, res) => {
+    const r = db.prepare("SELECT * FROM events WHERE id = ?").get(req.params.id);
+    if (!r) return res.status(404).json({ error: "not-found" });
+    res.json(r);
   });
 
   app.post("/api/events", (req, res) => {

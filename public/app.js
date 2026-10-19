@@ -408,22 +408,26 @@ async function attentionGroups() {
   const stale = data.stale_interactions || [];
   if (stale.length) groups.push({
     tag: "stale", label: "Stale follow-ups",
-    items: stale.map(r => `<span class="att-tag stale">Stale</span><span><span class="who">${esc(r.member_label)}</span> <span class="what">— next step "${esc(r.next_step)}" from ${esc(fmtDate(r.date))} is still ${esc(STATUS_LABEL[r.status] || r.status)}</span></span>`),
+    items: stale.map(r => ({ kind: "interaction", id: r.id,
+      html: `<span class="att-tag stale">Stale</span><span><span class="who">${esc(r.member_label)}</span> <span class="what">— next step "${esc(r.next_step)}" from ${esc(fmtDate(r.date))} is still ${esc(STATUS_LABEL[r.status] || r.status)}</span></span>` })),
   });
   const overdue = data.overdue_tasks || [];
   if (overdue.length) groups.push({
     tag: "overdue", label: "Overdue tasks",
-    items: overdue.map(t => `<span class="att-tag overdue">Overdue</span><span><span class="who">"${esc(t.title)}"</span> <span class="what">${t.group_name ? `(${esc(t.group_name)}) ` : ""}was due ${esc(fmtDate(t.due_date))}</span></span>`),
+    items: overdue.map(t => ({ kind: "task", id: t.id,
+      html: `<span class="att-tag overdue">Overdue</span><span><span class="who">"${esc(t.title)}"</span> <span class="what">${t.group_name ? `(${esc(t.group_name)}) ` : ""}was due ${esc(fmtDate(t.due_date))}</span></span>` })),
   });
   const upcoming = data.upcoming_events || [];
   if (upcoming.length) groups.push({
     tag: "upcoming", label: "Coming up",
-    items: upcoming.map(e => `<span class="att-tag upcoming">Upcoming</span><span><span class="who">${esc(e.description)}</span> <span class="what">— ${esc(fmtDate(e.date))}${e.lead_person ? ` (${esc(e.lead_person)})` : ""}</span></span>`),
+    items: upcoming.map(e => ({ kind: "event", id: e.id,
+      html: `<span class="att-tag upcoming">Upcoming</span><span><span class="who">${esc(e.description)}</span> <span class="what">— ${esc(fmtDate(e.date))}${e.lead_person ? ` (${esc(e.lead_person)})` : ""}</span></span>` })),
   });
   const qb = (quiet || []).slice(0, 8);
   if (qb.length) groups.push({
     tag: "touchbase", label: "Touch base",
-    items: qb.map(m => `<span class="att-tag touchbase">Touch base</span><span><span class="who">${esc(m.member_label)}</span> <span class="what">— ${m.last_contact ? `no logged contact since ${esc(fmtDate(m.last_contact))}` : "never contacted on record"}</span></span>`),
+    items: qb.map(m => ({ kind: "member", id: m.id,
+      html: `<span class="att-tag touchbase">Touch base</span><span><span class="who">${esc(m.member_label)}</span> <span class="what">— ${m.last_contact ? `no logged contact since ${esc(fmtDate(m.last_contact))}` : "never contacted on record"}</span></span>` })),
   });
   return groups;
 }
@@ -433,8 +437,35 @@ function attentionPanelHTML(groups) {
   return `<div class="card"><div class="p-head"><h3>Needs attention</h3><span class="p-sub">${total} open item${total === 1 ? "" : "s"}</span></div>
     <div class="attn-list">${groups.map(g => `
       <div class="attn-group">${esc(g.label)}</div>
-      <ul>${g.items.map(i => `<li class="attn-item">${i}</li>`).join("")}</ul>`).join("")}
+      <ul>${g.items.map(i => `<li class="attn-item" data-kind="${i.kind}" data-id="${i.id}" role="button" tabindex="0" title="Open">${i.html}</li>`).join("")}</ul>`).join("")}
     </div></div>`;
+}
+
+// Clicking a needs-attention item opens it for updating.
+async function openAttentionItem(kind, id) {
+  try {
+    if (kind === "interaction") {
+      const r = await api("/api/interactions/" + id);
+      openInteractionPanel(r);
+    } else if (kind === "task") {
+      const t = await api("/api/tasks/" + id);
+      openTaskModal(t.group_id, t);
+    } else if (kind === "event") {
+      const e = await api("/api/events/" + id);
+      openEventModal(e);
+    } else if (kind === "member") {
+      openMemberFromSearch(id);
+    }
+  } catch (e) { if (e.message !== "signed out") toast("Error: " + e.message); }
+}
+
+function wireAttentionClicks(box) {
+  if (!box) return;
+  box.querySelectorAll(".attn-item[data-kind]").forEach(li => {
+    const open = () => openAttentionItem(li.dataset.kind, li.dataset.id);
+    li.onclick = open;
+    li.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); } };
+  });
 }
 
 // Needs-attention strip on the interaction log (same data as the dashboard).
@@ -444,6 +475,7 @@ async function renderAttentionStrip() {
   const groups = await attentionGroups();
   if (!groups || !groups.length) return;
   box.innerHTML = attentionPanelHTML(groups);
+  wireAttentionClicks(box);
 }
 
 async function loadInteractions() {
@@ -2048,9 +2080,7 @@ async function renderDashboard() {
     <div class="kpi-grid" id="kpis"></div>
     <div class="dash-grid">
       <div>
-        <div class="card"><div class="p-head"><h3>Engagement activity</h3><span class="p-sub">interactions · last 12 months</span></div>
-          <div class="chart-wrap"><div class="chart-bars" id="chart"></div><div class="chart-axis" id="chart-axis"></div><div class="chart-foot" id="chart-foot"></div></div></div>
-        <div class="card" style="margin-top:20px"><div class="p-head"><h3>Recent interactions</h3><div class="p-actions"><button class="btn ghost" id="ri-all">View log</button></div></div>
+        <div class="card"><div class="p-head"><h3>Recent interactions</h3><div class="p-actions"><button class="btn ghost" id="ri-all">View log</button></div></div>
           <div id="ri-list"></div></div>
       </div>
       <div id="dash-attn"></div>
@@ -2064,12 +2094,14 @@ async function renderDashboard() {
     ]);
     state.members = members;
     renderKpis(interactions, members, projects, events);
-    renderActivityChart(interactions);
     renderRecentInteractions(interactions.slice(0, 6));
     const groups = await attentionGroups();
     const box = $("#dash-attn");
-    if (box) box.innerHTML = groups && groups.length ? attentionPanelHTML(groups)
-      : `<div class="card"><div class="p-head"><h3>Needs attention</h3></div><div class="empty-state"><div class="empty-title">All clear.</div><div class="empty-sub">No stale follow-ups, overdue tasks, or quiet relationships.</div></div></div>`;
+    if (box) {
+      box.innerHTML = groups && groups.length ? attentionPanelHTML(groups)
+        : `<div class="card"><div class="p-head"><h3>Needs attention</h3></div><div class="empty-state"><div class="empty-title">All clear.</div><div class="empty-sub">No stale follow-ups, overdue tasks, or quiet relationships.</div></div></div>`;
+      wireAttentionClicks(box);
+    }
   } catch (e) { if (e.message !== "signed out") toast("Error: " + e.message); }
 }
 
@@ -2093,35 +2125,6 @@ function renderKpis(interactions, members, projects, events) {
   ];
   box.innerHTML = kpis.map(([n, lbl, sub]) =>
     `<div class="kpi"><div class="num">${n}</div><div class="lbl">${lbl}</div><div class="sub">${esc(sub)}</div></div>`).join("");
-}
-
-function renderActivityChart(interactions) {
-  const bars = $("#chart"), axis = $("#chart-axis"), foot = $("#chart-foot");
-  if (!bars) return;
-  const months = [];
-  const now = new Date();
-  for (let k = 11; k >= 0; k--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - k, 1);
-    months.push({
-      key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`,
-      label: d.toLocaleDateString("en-US", { month: "short" }),
-    });
-  }
-  const counts = Object.fromEntries(months.map(m => [m.key, 0]));
-  for (const i of interactions) {
-    const k = (i.date || "").slice(0, 7);
-    if (k in counts) counts[k]++;
-  }
-  const max = Math.max(1, ...Object.values(counts));
-  const curKey = months[11].key;
-  bars.innerHTML = months.map(m => {
-    const c = counts[m.key];
-    const h = c ? Math.max(8, Math.round(c / max * 100)) : 2;
-    return `<div class="chart-bar${m.key === curKey ? " cur" : ""}" style="height:${h}%" title="${m.label}: ${c}"><span class="tip">${m.label} — ${c} interaction${c === 1 ? "" : "s"}</span></div>`;
-  }).join("");
-  axis.innerHTML = months.map((m, i) => `<span>${i % 2 === 0 ? m.label : ""}</span>`).join("");
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  foot.textContent = `${total} interaction${total === 1 ? "" : "s"} logged in the last 12 months.`;
 }
 
 function renderRecentInteractions(rows) {

@@ -196,6 +196,25 @@ let evId;
   ok("delete event -> 200", r.status === 200, `got ${r.status}`);
 }
 
+console.log("single-item GET endpoints (attention click-through)");
+{
+  let r = await req("POST", "/api/events", { date: "2026-12-10", description: "Click-through test", lead_person: "T. Boles" });
+  const eid = r.json.id;
+  r = await req("GET", `/api/events/${eid}`);
+  ok("GET /api/events/:id -> 200 with full record", r.status === 200 && r.json.description === "Click-through test", `got ${r.status}`);
+  r = await req("GET", "/api/events/999999");
+  ok("GET /api/events/:id missing -> 404", r.status === 404, `got ${r.status}`);
+  await req("DELETE", `/api/events/${eid}`);
+
+  r = await req("POST", "/api/interactions", { member_id: memberId, date: "2026-10-05", summary: "Click-through test interaction.", interaction_type: "Call" });
+  const tmpIx = r.json.id;
+  r = await req("GET", `/api/interactions/${tmpIx}`);
+  ok("GET /api/interactions/:id -> 200", r.status === 200 && r.json.id === tmpIx, `got ${r.status}`);
+  r = await req("GET", "/api/interactions/999999");
+  ok("GET /api/interactions/:id missing -> 404", r.status === 404, `got ${r.status}`);
+  await req("DELETE", `/api/interactions/${tmpIx}`);
+}
+
 console.log("projects/tasks CRUD + reorder + note cap");
 let gid, t1, t2;
 {
@@ -222,6 +241,10 @@ let gid, t1, t2;
   ok("move top task up -> not moved", r.json?.moved === false);
   r = await req("PUT", `/api/tasks/${t1}`, { title: "First task (renamed)", owner: "J. Doe", status: "done", note: "Done deal. All good." });
   ok("update task -> 200", r.status === 200, `got ${r.status}`);
+  r = await req("GET", `/api/tasks/${t1}`);
+  ok("GET /api/tasks/:id -> 200", r.status === 200 && r.json.id === t1, `got ${r.status}`);
+  r = await req("GET", "/api/tasks/999999");
+  ok("GET /api/tasks/:id missing -> 404", r.status === 404, `got ${r.status}`);
   r = await req("DELETE", `/api/tasks/${t1}`);
   ok("delete task -> 200", r.status === 200, `got ${r.status}`);
   r = await req("DELETE", `/api/projects/groups/${gid}`);
