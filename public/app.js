@@ -29,7 +29,18 @@ async function api(path, opts = {}) {
     throw e;
   }
   if (r.status === 401) { location.href = "/login.html"; throw new Error("signed out"); }
-  const data = await r.json().catch(() => ({}));
+  let data = await r.json().catch(() => ({}));
+  // Stale CSRF token (e.g. session predates the csrf column): refresh from
+  // /api/me once and retry the request a single time.
+  if (r.status === 403 && data.error === "bad csrf token" && !opts._csrfRetried) {
+    try {
+      const me = await fetch("/api/me", { headers: { "Content-Type": "application/json" } }).then(x => x.json());
+      if (me.csrf) {
+        csrfToken = me.csrf;
+        return api(path, { ...opts, _csrfRetried: true });
+      }
+    } catch {}
+  }
   if (!r.ok) throw new Error(data.error || `Request failed (${r.status})`);
   return data;
 }

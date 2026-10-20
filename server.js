@@ -407,7 +407,13 @@ export function createApp(db, { uploadsDir, port = null } = {}) {
       const s = db.prepare("SELECT user_id, expires_at, csrf FROM sessions WHERE token = ?").get(token);
       if (s && new Date(s.expires_at).getTime() > Date.now()) {
         const u = db.prepare("SELECT id, email, role, created_at FROM users WHERE id = ?").get(s.user_id);
-        if (u) req.user = { ...u, csrf: s.csrf || "" };
+        // Backfill CSRF for sessions created before the csrf column existed.
+        let csrf = s.csrf || "";
+        if (!csrf) {
+          csrf = crypto.randomBytes(16).toString("hex");
+          db.prepare("UPDATE sessions SET csrf = ? WHERE token = ?").run(csrf, token);
+        }
+        if (u) req.user = { ...u, csrf };
       } else if (s) {
         db.prepare("DELETE FROM sessions WHERE token = ?").run(token);
       }
